@@ -5,7 +5,7 @@ project and BuildRush runs only the work that is provably necessary, reuses
 valid previous results, runs independent tasks in parallel, and tells you
 exactly why anything ran.
 
-> **Status: early (0.1).** The core engine is real and tested (49 tests,
+> **Status: early (0.1).** The core engine is real and tested (60 tests,
 > including adversarial cache/path/secret tests). Watch mode, daemon,
 > tool-specific adapters and Windows support are **not built yet**; see
 > [ROADMAP.md](ROADMAP.md). No benchmark claims are made until the benchmark
@@ -38,22 +38,26 @@ BuildRush succeeded: 2 ran, 1 cached, 0 failed, 0 skipped in 6.0s
 
 Details: [docs/cache-correctness.md](docs/cache-correctness.md) · [docs/security.md](docs/security.md).
 
-## Measured so far (honest numbers)
+## Measured results (and where BuildRush does *not* win)
 
-BuildRush building and testing **itself** (typecheck + build + 49 tests), one run each on a shared 1-machine sandbox, *not* a benchmark:
+Generated TypeScript apps, Vite 6 + Vitest 3 + tsc 5.9, 4-core shared sandbox, 5 runs each, median. Reproduce with `node bench/run.mjs` ([method](bench/README.md)). "Native parallel" is `tsc && vite build` running alongside `vitest run`; compare against that, not the sequential chain.
 
-| Scenario | Wall time |
-| --- | --- |
-| Cold | ~6.1 s |
-| Nothing changed | ~0.21 s |
-| `touch` only (mtime changed, content same) | ~0.22 s (no rebuild) |
-| One source line edited | ~6.1 s (all three tasks list `src/**` as inputs; cache granularity is per task) |
+| Scenario (medium: 400 modules, 60 tests) | Native parallel | BuildRush |
+| --- | --- | --- |
+| Cold full run | 10.5 s | 11.3 s (~8% slower) |
+| **No change** | 10.9 s | **0.11 s (~100x faster)** |
+| One-file edit, full pipeline | 10.5 s | 10.6 s (equal) |
+| **Restore deleted `dist/`** | 0.95 s (rebuild) | **0.12 s** |
+| Tests only after a narrow edit | `vitest related` 2.08 s | `test --affected` 2.87 s (**slower**), vs 9.45 s for all tests |
+| Tests only after a wide edit | `vitest related` 9.62 s | 10.3 s (**slower**; all tests selected) |
 
-Proper medians/p95 vs native commands on documented workloads are on the roadmap.
+The small workload (60 modules) shows the same shape: no-change 86 ms vs 2.0 s, cold 2.09 s vs 1.93 s.
+
+What this says honestly: the cache pays off when nothing relevant changed (the common case between edits, branch switches and CI reruns). When real work must happen, BuildRush costs roughly 0-8% more than a well-written parallel script, and `--affected` currently carries ~0.8 s of overhead versus Vitest's own `related`. Reducing that overhead is the next optimisation target. Memory/CPU, Windows and real monorepos are **not measured**; there are no comparisons with Nx/Turborepo/Bazel.
 
 ## Docs
 
-[Configuration & commands](docs/configuration.md) · [Architecture & prior art](docs/architecture.md) · [Security model](docs/security.md) · [Cache correctness](docs/cache-correctness.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Governance](GOVERNANCE.md) · [Security policy](SECURITY.md)
+[Configuration & commands](docs/configuration.md) · [Adapters](docs/adapters.md) · [Benchmarks](bench/README.md) · [Architecture & prior art](docs/architecture.md) · [Security model](docs/security.md) · [Cache correctness](docs/cache-correctness.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Governance](GOVERNANCE.md) · [Security policy](SECURITY.md)
 
 ## Requirements
 

@@ -1,0 +1,235 @@
+{
+  "machine": {
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "cores": 4,
+    "memGiB": 15.7,
+    "os": "Linux 6.18.44-fc-v726",
+    "node": "v22.23.5",
+    "tools": {
+      "typescript": "5.9.3",
+      "vite": "6.4.6",
+      "vitest": "3.2.7"
+    },
+    "buildrush": "0.1.0",
+    "gitSha": "b98bab0"
+  },
+  "workload": "small",
+  "preset": {
+    "modules": 60,
+    "tests": 12,
+    "assets": 0
+  },
+  "runs": 5,
+  "at": "2026-11-22T05:14:21.667Z",
+  "scenarios": {
+    "cold full run (typecheck+build+test)": {
+      "native sequential": {
+        "n": 5,
+        "median": 2754.893135999999,
+        "p95": 2921.9682329999996,
+        "min": 2683.1214709999986,
+        "max": 2921.9682329999996
+      },
+      "native parallel": {
+        "n": 5,
+        "median": 1932.3852229999975,
+        "p95": 1957.5835170000028,
+        "min": 1877.6975740000016,
+        "max": 1957.5835170000028
+      },
+      "buildrush": {
+        "n": 5,
+        "median": 2091.916476,
+        "p95": 2120.137205,
+        "min": 1995.359521,
+        "max": 2120.137205
+      }
+    },
+    "no-change run": {
+      "native sequential": {
+        "n": 5,
+        "median": 2890.3207819999952,
+        "p95": 2928.205965999994,
+        "min": 2827.4200009999986,
+        "max": 2928.205965999994
+      },
+      "native parallel": {
+        "n": 5,
+        "median": 2002.306690000005,
+        "p95": 2063.874901999996,
+        "min": 1966.3811869999918,
+        "max": 2063.874901999996
+      },
+      "buildrush": {
+        "n": 5,
+        "median": 85.551593,
+        "p95": 100.603695,
+        "min": 80.97428,
+        "max": 100.603695
+      }
+    },
+    "one-file edit, narrow impact (src/lib/m59.ts), full pipeline": {
+      "native sequential": {
+        "n": 5,
+        "median": 2978.692851999993,
+        "p95": 3143.8345899999986,
+        "min": 2851.5559580000117,
+        "max": 3143.8345899999986
+      },
+      "native parallel": {
+        "n": 5,
+        "median": 1964.3106689999986,
+        "p95": 2070.912664000003,
+        "min": 1939.352086999992,
+        "max": 2070.912664000003
+      },
+      "buildrush": {
+        "n": 5,
+        "median": 2124.361078,
+        "p95": 2210.642789,
+        "min": 2046.714742,
+        "max": 2210.642789
+      }
+    },
+    "one-file edit, narrow impact (src/lib/m59.ts), TESTS ONLY": {
+      "native vitest run (all tests)": {
+        "n": 5,
+        "median": 1608.673437,
+        "p95": 1612.832285,
+        "min": 1492.17916,
+        "max": 1612.832285
+      },
+      "native vitest related": {
+        "n": 5,
+        "median": 801.055075,
+        "p95": 869.618745,
+        "min": 772.684304,
+        "max": 869.618745
+      },
+      "buildrush test --affected": {
+        "n": 5,
+        "median": 1081.64709,
+        "p95": 1115.512301,
+        "min": 1025.021715,
+        "max": 1115.512301
+      },
+      "_buildrush tests selected": 1
+    },
+    "one-file edit, wide impact (src/lib/m0.ts), full pipeline": {
+      "native sequential": {
+        "n": 5,
+        "median": 3014.1732210000046,
+        "p95": 3062.0129489999963,
+        "min": 2960.8419270000013,
+        "max": 3062.0129489999963
+      },
+      "native parallel": {
+        "n": 5,
+        "median": 2122.7720110000228,
+        "p95": 2214.608253000013,
+        "min": 2058.573485000001,
+        "max": 2214.608253000013
+      },
+      "buildrush": {
+        "n": 5,
+        "median": 2239.60579,
+        "p95": 2374.596984,
+        "min": 2218.718069,
+        "max": 2374.596984
+      }
+    },
+    "one-file edit, wide impact (src/lib/m0.ts), TESTS ONLY": {
+      "native vitest run (all tests)": {
+        "n": 5,
+        "median": 1701.134897,
+        "p95": 1805.323591,
+        "min": 1650.020951,
+        "max": 1805.323591
+      },
+      "native vitest related": {
+        "n": 5,
+        "median": 1635.905231,
+        "p95": 1648.059042,
+        "min": 1529.61584,
+        "max": 1648.059042
+      },
+      "buildrush test --affected": {
+        "n": 5,
+        "median": 1794.26551,
+        "p95": 1860.70177,
+        "min": 1710.007219,
+        "max": 1860.70177
+      },
+      "_buildrush tests selected": 12
+    },
+    "config change (vite.config.ts), full pipeline": {
+      "native sequential": {
+        "n": 5,
+        "median": 2955.5498640000005,
+        "p95": 3035.991729000001,
+        "min": 2927.788618999999,
+        "max": 3035.991729000001
+      },
+      "buildrush": {
+        "n": 5,
+        "median": 2300.254146,
+        "p95": 2439.497718,
+        "min": 2257.279452,
+        "max": 2439.497718
+      }
+    },
+    "lockfile change, full pipeline": {
+      "native sequential": {
+        "n": 5,
+        "median": 3004.2764869999955,
+        "p95": 3152.7905169999867,
+        "min": 2889.5521230000013,
+        "max": 3152.7905169999867
+      },
+      "buildrush": {
+        "n": 5,
+        "median": 2281.012843,
+        "p95": 2358.569177,
+        "min": 2210.583482,
+        "max": 2358.569177
+      }
+    },
+    "cache restore after deleting dist/": {
+      "native vite build": {
+        "n": 5,
+        "median": 424.450855,
+        "p95": 456.37781,
+        "min": 380.794458,
+        "max": 456.37781
+      },
+      "buildrush (wall)": {
+        "n": 5,
+        "median": 93.022757,
+        "p95": 113.365181,
+        "min": 90.785953,
+        "max": 113.365181
+      },
+      "buildrush (restore step only)": {
+        "n": 5,
+        "median": 5,
+        "p95": 7,
+        "min": 4,
+        "max": 7
+      }
+    },
+    "graph construction (buildrush analyze)": {
+      "buildrush": {
+        "n": 5,
+        "median": 89.137373,
+        "p95": 105.142094,
+        "min": 75.503186,
+        "max": 105.142094
+      }
+    }
+  },
+  "checks": {
+    "restoredBuildEqualsNativeBuild": true
+  },
+  "cacheDiskBytes": 30491,
+  "memory": "not measured"
+}
