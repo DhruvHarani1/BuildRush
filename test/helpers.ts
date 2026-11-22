@@ -17,7 +17,8 @@ export async function writeFiles(dir: string, files: Record<string, string>): Pr
   }
 }
 
-export const rm = (dir: string) => fs.rm(dir, { recursive: true, force: true });
+// Windows can briefly hold directories open (AV scanners, just-exited children): retry instead of flaking.
+export const rm = (dir: string) => fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 
 export function git(dir: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8' });

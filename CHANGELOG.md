@@ -15,6 +15,7 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - Security docs, CI, CodeQL, OpenSSF Scorecard, dependency review, provenance-enabled release workflow, hardened Dockerfile.
 
 - Adapters (`vite`, `vitest`, `tsc`, `eslint`): tool-aware inputs (incl. `.env*`, `VITE_*`), outDir discovery, tool-version fingerprinting, refusal of uncacheable modes, failure diagnostics. See docs/adapters.md.
+- Opt-in per-test-file result caching for test tasks (`"testCache": true`): unchanged test files (own content + import closure + global config + env + toolchain) are skipped after a prior passing run, with per-file skip reasons; uncertain imports always run. See docs/configuration.md.
 - Benchmark suite (`bench/`) with native-sequential and native-parallel baselines and a restored-build equality check.
 - `scripts/apply-github-security.sh`: idempotent repository hardening (branch protection, rulesets, Actions policy).
 
