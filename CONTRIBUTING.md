@@ -26,8 +26,8 @@ node bin/buildrush.js run   # dogfood: BuildRush builds and tests itself
 
 ## Pull requests
 
-Small, focused PRs with a description of *why*. CI (typecheck, tests on Linux
-and macOS, CodeQL, dependency review) must pass. Sign off commits with
+Small, focused PRs with a description of *why*. CI (typecheck, tests on Linux,
+macOS and Windows, CodeQL, dependency review) must pass. Sign off commits with
 `git commit -s` (Developer Certificate of Origin, <https://developercertificate.org>);
 by doing so you certify you may submit the work under the project's MIT license.
 

@@ -60,6 +60,38 @@ export function resolveExecutable(cmd: string, cwd: string, root: string, pathEn
   return null;
 }
 
+/**
+ * Extract the JS entry point from an npm/pnpm/yarn `.cmd` shim (e.g. `"%dp0%\..\vite\bin\vite.js"`).
+ * Windows cannot spawn `.cmd` files without a shell, and routing arguments through cmd.exe is an
+ * injection risk, so we run the shim's real target directly with node instead. Returns null when
+ * the shim is not a recognisable node launcher.
+ */
+export function parseCmdShim(shimText: string, shimPath: string): string | null {
+  // Shims mention "%dp0%\node.exe" (the optional bundled node) before the real script: take the
+  // first quoted %dp0%-relative path that is an existing file other than node.exe.
+  for (const m of shimText.matchAll(/"%(?:~dp0|dp0%)\\?([^"%]+)"/gi)) {
+    const rel = m[1]!.replace(/\\/g, path.sep);
+    if (/(^|[\\/])node(\.exe)?$/i.test(rel)) continue;
+    const target = path.resolve(path.dirname(shimPath), rel);
+    try {
+      if (fs.statSync(target).isFile()) return target;
+    } catch { /* try the next candidate */ }
+  }
+  return null;
+}
+
+/** Turn a resolved executable into a shell-free (file, args) pair; unwraps Windows .cmd shims. */
+export function toSpawnArgs(file: string, args: string[]): { file: string; args: string[]; error?: string } {
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(file)) {
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch { /* handled below */ }
+    const target = parseCmdShim(text, file);
+    if (!target) return { file, args, error: `cannot run ${file} without a shell: not a recognised Node.js launcher shim (BuildRush never passes arguments through cmd.exe)` };
+    return { file: process.execPath, args: [target, ...args] };
+  }
+  return { file, args };
+}
+
 export function runCommand(opts: {
   file: string;
   args: string[];
@@ -73,7 +105,9 @@ export function runCommand(opts: {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(opts.file, opts.args, {
+      const sp = toSpawnArgs(opts.file, opts.args);
+      if (sp.error) throw new Error(sp.error);
+      child = spawn(sp.file, sp.args, {
         cwd: opts.cwd,
         env: opts.env,
         stdio: ['ignore', 'pipe', 'pipe'],

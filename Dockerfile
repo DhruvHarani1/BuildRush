@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# TODO(maintainer): pin both FROM lines by digest (see docs/MAINTAINER_CHECKLIST.md).
-FROM node:22-slim AS build
+# Base image pinned by digest (node:22-slim); Dependabot's docker ecosystem bumps tag and digest together.
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS build
 WORKDIR /src
 COPY package.json package-lock.json .npmrc tsconfig.json ./
 RUN npm ci
@@ -9,7 +9,7 @@ COPY test ./test
 COPY bin ./bin
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-slim
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
 LABEL org.opencontainers.image.source="https://github.com/DhruvHarani1/BuildRush" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.description="BuildRush: local-first incremental build and test engine"
