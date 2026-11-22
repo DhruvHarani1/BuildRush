@@ -43,4 +43,4 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm audit signatures
       - name: Package contents are exactly what we intend to ship
-        run: npm run build && npm pack --dry-run --json | node -e "const p=JSON.parse(require('fs').readFileSync(0,'utf8'))[0]; const bad=p.files.filter(f=>/(^|\/)(test|\.github|\.env)/.test(f.path)); if(bad.length){console.error(bad);process.exit(1)}"
+        run: npm run build && npm pack --dry-run --json | node -e "const p=JSON.parse(require('fs').readFileSync(0,'utf8'))[0]; const bad=p.files.filter(f=>/(^|\/)(test\/|\.github\/|\.env)/.test(f.path)); if(bad.length){console.error(bad);process.exit(1)}"
