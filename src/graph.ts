@@ -32,7 +32,9 @@ export function scanSource(src: string): ScanResult {
   const uncertain: string[] = [];
   const add = (spec: string, kind: EdgeKind) => specs.push({ spec, kind });
   let m: RegExpExecArray | null;
-  const stat = /\b(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\s+from\s*|\s*)(['"])([^'"\n]+)\1/g;
+  // `\s+(?=\S)` makes the whitespace run atomic: without it `import` + N spaces backtracks cubically.
+  // The lookahead alternative also accepts minified forms such as `import{a}from"x"` / `import"x"`.
+  const stat = /\b(?:import|export)(?:\s+(?=\S)|(?=[{*'"]))(?:type\s+)?(?:[^'"`;]*?\bfrom\s*|\s*)(['"])([^'"\n]+)\1/g;
   while ((m = stat.exec(src))) add(m[2]!, 'import');
   const dyn = /\bimport\s*\(\s*(['"])([^'"\n]+)\1\s*[,)]/g;
   while ((m = dyn.exec(src))) add(m[2]!, 'dynamic-import');
@@ -40,8 +42,8 @@ export function scanSource(src: string): ScanResult {
   while ((m = req.exec(src))) add(m[2]!, 'require');
   const impEq = /\bimport\s+\w+\s*=\s*require\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g;
   while ((m = impEq.exec(src))) add(m[2]!, 'require');
-  if (/\bimport\s*\(\s*(?!['"])/.test(src)) uncertain.push('dynamic import() with non-literal specifier');
-  if (/(?<![\w.$])require\s*\(\s*(?!['"])/.test(src)) uncertain.push('require() with non-literal specifier');
+  if (/\bimport\s*\(\s*(?![\s'"])/.test(src)) uncertain.push('dynamic import() with non-literal specifier');
+  if (/(?<![\w.$])require\s*\(\s*(?![\s'"])/.test(src)) uncertain.push('require() with non-literal specifier');
   if (/\bimport\.meta\.glob(?:Eager)?\s*\(/.test(src)) uncertain.push('import.meta.glob()');
   if (/\brequire\.context\s*\(/.test(src)) uncertain.push('require.context()');
   return { specs, uncertain };
