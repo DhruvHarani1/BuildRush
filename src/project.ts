@@ -43,6 +43,13 @@ export class Project {
       t.envPrefixes = r.envPrefixes;
       if (!r.cache && !userOutputs) t.cache = false;
       t.notes = r.notes;
+      if (t.testCache && t.adapter === 'vitest') {
+        const customised = r.inputs === null || t.command.some((a) => /^(--config|-c|--root|-r|--dir|--workspace|--project)(=|$)/.test(a));
+        if (customised) {
+          t.testCache = false;
+          t.notes.push('testCache disabled: the vitest config/command customises root/include/setupFiles/dir, so per-file inputs cannot be bounded safely.');
+        }
+      }
     }
     const stateDir = path.join(root, '.buildrush', 'state');
     const cacheDir = process.env.BUILDRUSH_CACHE_DIR
