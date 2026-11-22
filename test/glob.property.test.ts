@@ -224,7 +224,7 @@ test('glob: arbitrary garbage patterns either compile or throw a clean Error (no
   const alphabet = ['*', '**', '?', '{', '}', ',', '/', 'a', '.', '\\', '[', ']', '(', ')', '|', '+', '^', '$', '\0', 'é', '\u{1F600}', ' '];
   forAll('glob-garbage', 8000, 500, (rng) => {
     const p = rng.string(alphabet, 0, 24);
-    let rx: RegExp | undefined;
+    let rx: { test(s: string): boolean };
     try {
       rx = globToRegExp(p);
     } catch (e) {
@@ -246,7 +246,7 @@ function timed(fn: () => void): number {
 
 test('glob: adversarial patterns do not backtrack catastrophically', () => {
   const LIMIT_MS = 1000;
-  // Sizes are deliberately modest: see the skipped test below for the known super-linear blow-up.
+  // Sizes are deliberately modest: the glob matcher is linear-time (NFA simulation); larger sizes are covered below.
   const longA = 'a'.repeat(40);
   const cases: { name: string; pattern: string; input: string }[] = [
     { name: 'several single stars, failing tail', pattern: '*a'.repeat(5) + '*b', input: longA },
@@ -266,16 +266,12 @@ test('glob: adversarial patterns do not backtrack catastrophically', () => {
   }
 });
 
-// KNOWN ISSUE (reported, not fixed here): the regex translation is O(n^k) for k wildcards on a failing
-// match (measured on Node 22: `*a` x8 + `*b` against 40 chars takes ~6s). Fixing needs a non-backtracking
-// matcher, which is a src/ redesign. Un-skip once glob.ts is linear-time.
-test('glob: ten wildcards against a failing input stay fast', { skip: 'known issue: polynomial backtracking in glob.ts' }, () => {
+test('glob: ten wildcards against a failing input stay fast', () => {
   const ms = timed(() => globToRegExp('*a'.repeat(10) + '*b').test('a'.repeat(40)));
   assert.ok(ms < 1000, `took ${ms.toFixed(0)}ms`);
 });
 
-// KNOWN ISSUE: repeated alternations are exponential: `{a,a}` x40 + `b` never finishes (2^40 paths).
-test('glob: forty repeated alternations against a failing input stay fast', { skip: 'known issue: exponential backtracking in glob.ts' }, () => {
+test('glob: forty repeated alternations against a failing input stay fast', () => {
   const ms = timed(() => globToRegExp('{a,a}'.repeat(40) + 'b').test('a'.repeat(80)));
   assert.ok(ms < 1000, `took ${ms.toFixed(0)}ms`);
 });
