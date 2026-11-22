@@ -21,6 +21,9 @@ export interface ScanResult {
   uncertain: string[];
 }
 
+/** Longest import/export clause (in chars) scanned for its specifier: bounds worst-case work per keyword. */
+const MAX_STATEMENT_SCAN = 8192;
+
 /**
  * Extract module specifiers. This deliberately OVER-approximates: text in
  * comments or strings can create extra edges (which only ever causes extra
@@ -32,10 +35,26 @@ export function scanSource(src: string): ScanResult {
   const uncertain: string[] = [];
   const add = (spec: string, kind: EdgeKind) => specs.push({ spec, kind });
   let m: RegExpExecArray | null;
-  // `\s+(?=\S)` makes the whitespace run atomic: without it `import` + N spaces backtracks cubically.
-  // The lookahead alternative also accepts minified forms such as `import{a}from"x"` / `import"x"`.
-  const stat = /\b(?:import|export)(?:\s+(?=\S)|(?=[{*'"]))(?:type\s+)?(?:[^'"`;]*?\bfrom\s*|\s*)(['"])([^'"\n]+)\1/g;
-  while ((m = stat.exec(src))) add(m[2]!, 'import');
+  // Static import/export: found with a linear keyword scan plus a bounded manual walk instead of one
+  // big regex (a regex with overlapping `\s` / `[^'"]` runs backtracks polynomially on hostile input,
+  // which CodeQL flags as js/polynomial-redos). Accepts minified forms like `import{a}from"x"`.
+  const kw = /\b(?:import|export)(?![\w$])/g;
+  while ((m = kw.exec(src))) {
+    const start = m.index + m[0].length;
+    const next = src[start];
+    if (next === undefined || !(/\s/.test(next) || next === '{' || next === '*' || next === "'" || next === '"')) continue;
+    const limit = Math.min(src.length, start + MAX_STATEMENT_SCAN);
+    let i = start;
+    while (i < limit && src[i] !== "'" && src[i] !== '"' && src[i] !== '`' && src[i] !== ';') i++;
+    const q = src[i];
+    if (i >= limit || (q !== "'" && q !== '"')) continue;
+    const head = src.slice(start, i).trimEnd();
+    // Either a bare side-effect import (`import "x"`) or a clause ending in the `from` keyword.
+    if (head !== '' && !(head.endsWith('from') && !/[\w$]/.test(head[head.length - 5] ?? ' '))) continue;
+    let j = i + 1;
+    while (j < src.length && src[j] !== "'" && src[j] !== '"' && src[j] !== '\n') j++;
+    if (src[j] === q && j > i + 1) add(src.slice(i + 1, j), 'import');
+  }
   const dyn = /\bimport\s*\(\s*(['"])([^'"\n]+)\1\s*[,)]/g;
   while ((m = dyn.exec(src))) add(m[2]!, 'dynamic-import');
   const req = /\brequire\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g;
