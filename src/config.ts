@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { availableParallelism } from 'node:os';
 import { safeRelative } from './util/paths.js';
 import { globToRegExp } from './util/glob.js';
+import { ADAPTER_KIND, ADAPTER_NAMES, AdapterName } from './adapters.js';
 
 export const CONFIG_FILE = 'buildrush.json';
 
@@ -27,6 +28,11 @@ export interface TaskConfig {
   timeoutMs: number | null;
   /** For test tasks: append selected test files to argv under --affected. */
   affected: boolean;
+  adapter: AdapterName | null;
+  /** Env var name prefixes whose present variables are passed AND fingerprinted (set by adapters). */
+  envPrefixes: string[];
+  /** Adapter findings shown by `doctor` / `explain`. */
+  notes: string[];
 }
 
 export interface Config {
@@ -88,7 +94,7 @@ export function splitCommand(cmd: string): string[] {
 }
 
 const TASK_KEYS = new Set([
-  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected',
+  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter',
 ]);
 const TOP_KEYS = new Set(['$schema', 'version', 'project', 'tasks', 'pipelines', 'ignore', 'concurrency', 'cache', 'tests']);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -138,8 +144,15 @@ export function validateConfig(raw: unknown): Config {
         continue;
       }
       for (const k of Object.keys(t)) if (!TASK_KEYS.has(k)) issues.push(`${w}.${k}: unknown key`);
+      let adapter: AdapterName | null = null;
+      if (t.adapter !== undefined) {
+        if (typeof t.adapter === 'string' && (ADAPTER_NAMES as readonly string[]).includes(t.adapter)) adapter = t.adapter as AdapterName;
+        else issues.push(`${w}.adapter: must be one of ${ADAPTER_NAMES.join(', ')}`);
+      }
       let command: string[] = [];
-      if (typeof t.command === 'string') {
+      if (t.command === undefined && adapter) {
+        command = [];
+      } else if (typeof t.command === 'string') {
         try {
           command = splitCommand(t.command);
         } catch (e) {
@@ -162,7 +175,7 @@ export function validateConfig(raw: unknown): Config {
       const passEnv = t.passEnv === undefined ? [] : (strArray(t.passEnv, `${w}.passEnv`, issues) ?? []);
       for (const e of [...env, ...passEnv]) if (!ENV_NAME.test(e)) issues.push(`${w}: invalid env var name ${JSON.stringify(e)}`);
       if (t.cache !== undefined && typeof t.cache !== 'boolean') issues.push(`${w}.cache: must be boolean`);
-      const kind = (t.kind ?? 'run') as TaskKind;
+      const kind = (t.kind ?? (adapter ? ADAPTER_KIND[adapter] : 'run')) as TaskKind;
       if (!['build', 'test', 'check', 'run'].includes(kind)) issues.push(`${w}.kind: must be build|test|check|run`);
       let cwd = '.';
       if (t.cwd !== undefined) {
@@ -194,6 +207,9 @@ export function validateConfig(raw: unknown): Config {
         cpu: typeof cpu === 'number' ? cpu : 1,
         timeoutMs: timeoutMs as number | null,
         affected: t.affected === undefined ? kind === 'test' : (t.affected as boolean),
+        adapter,
+        envPrefixes: [],
+        notes: [],
       };
     }
   }

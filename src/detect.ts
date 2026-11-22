@@ -51,28 +51,13 @@ export async function detectProject(root: string): Promise<Detection> {
 
 /** Starter config derived from what is actually installed; conservative defaults. */
 export function starterConfig(d: Detection): Record<string, unknown> {
-  const lock = d.lockfiles.length ? d.lockfiles : ['package.json'];
-  const common = ['package.json', ...lock, '.nvmrc', '.node-version'];
   const tasks: Record<string, unknown> = {};
   const has = (t: string) => d.tools.includes(t);
-  if (d.hasTypeScript && has('typescript')) {
-    tasks.typecheck = { command: 'tsc --noEmit', kind: 'check', inputs: ['src/**', 'test/**', 'tests/**', 'tsconfig*.json', ...common] };
-  }
-  if (has('eslint')) {
-    tasks.lint = { command: 'eslint .', kind: 'check', inputs: ['src/**', 'test/**', 'tests/**', 'eslint.config.*', '.eslintrc*', ...common] };
-  }
-  if (has('vitest')) {
-    tasks.test = {
-      command: 'vitest run', kind: 'test', affected: true,
-      inputs: ['src/**', 'test/**', 'tests/**', 'vitest.config.*', 'vite.config.*', 'tsconfig*.json', ...common],
-    };
-  }
-  if (has('vite')) {
-    tasks.build = {
-      command: 'vite build', kind: 'build', dependsOn: Object.keys(tasks).filter((t) => t === 'typecheck'),
-      inputs: ['src/**', 'public/**', 'index.html', 'vite.config.*', 'tsconfig*.json', ...common], outputs: ['dist/**'],
-    };
-  }
+  // Adapters supply tool-correct commands, inputs (incl. hidden ones like .env), outputs and env.
+  if (d.hasTypeScript && has('typescript')) tasks.typecheck = { adapter: 'tsc' };
+  if (has('eslint')) tasks.lint = { adapter: 'eslint' };
+  if (has('vitest')) tasks.test = { adapter: 'vitest', affected: true };
+  if (has('vite')) tasks.build = { adapter: 'vite', ...(tasks.typecheck ? { dependsOn: ['typecheck'] } : {}) };
   if (Object.keys(tasks).length === 0) {
     // No recognised tool: fall back to package scripts. These are opaque to BuildRush, so they
     // run uncached-by-default knowledge-wise: inputs default to the whole project (safe, coarse).
@@ -86,6 +71,6 @@ export function starterConfig(d: Detection): Record<string, unknown> {
     version: 1,
     project: { name: d.name },
     tasks,
-    pipelines: { default: names, check: names.filter((n) => tasks[n] && (tasks[n] as { kind: string }).kind === 'check') },
+    pipelines: { default: names, check: names.filter((n) => { const t = tasks[n] as { kind?: string; adapter?: string }; return t.kind === 'check' || t.adapter === 'tsc' || t.adapter === 'eslint'; }) },
   };
 }

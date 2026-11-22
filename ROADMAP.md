@@ -8,8 +8,8 @@ shipped unless tests exercise it.
 | M1 CLI, config, init/analyze/doctor | ✅ | strict schema, shell-free commands |
 | M2 Task graph, scheduler, execution, cancellation | ✅ | bounded, critical-path first |
 | M3 Persistent CAS cache + explanations | ✅ | verify/repair/gc, corruption + traversal + symlink tests |
-| M4 Vite adapter + baseline benchmarks | ⬜ | today Vite runs as a generic task; need declared-output discovery and a benchmark suite (cold/warm/1-file/lockfile) vs native commands, median + p95 |
-| M5 Vitest adapter | 🟡 | `--affected` file selection works generically; missing: coverage-informed and risk-based modes, per-file result caching, sharding, flaky-test policy, duration history |
+| M4 Vite adapter + baseline benchmarks | ✅ | `vite`/`tsc`/`eslint` adapters (hidden-input handling, outDir discovery, VITE_* env); benchmark suite with parallel-native baseline, correctness gate, median/p95. Still missing: memory/CPU sampling, real-monorepo and slow-install workloads |
+| M5 Vitest adapter | 🟡 | adapter + `--affected` selection shipped and benchmarked; missing: coverage-informed and risk-based modes, per-file result caching, sharding, flaky-test policy, duration history |
 | M6 Watch mode + daemon | ⬜ | needs watcher w/ overflow recovery, debounce, authenticated local IPC |
 | M7 Hardening & release | 🟡 | security docs, CI, CodeQL, Scorecard, provenance release written; macOS/Windows test matrix, fuzzing of the import scanner, npm/Docker publication still to do |
 | Workspaces | ⬜ | per-package task expansion (`build` in every package, ordered by package deps) |

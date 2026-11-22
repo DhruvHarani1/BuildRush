@@ -324,3 +324,26 @@ test('broad output globs never sweep node_modules, .git or the cache into the ma
     assert.deepEqual(rec!.outputs.map((o) => o.path), ['dist/bundle.txt']);
   } finally { await rm(dir); }
 });
+
+test('a task never treats an unrelated task\'s outputs as inputs, but does for tasks it depends on', async () => {
+  const files = {
+    'buildrush.json': JSON.stringify({ version: 1, project: { name: 'p' }, tasks: {
+      producer: { command: 'node make.js', inputs: ['make.js', 'seed.txt'], outputs: ['gen/**'] },
+      bystander: { command: 'node -e 0', inputs: ['**/*.txt'] },            // glob also matches gen/out.txt
+      consumer: { command: 'node -e 0', dependsOn: ['producer'], inputs: ['gen/**'] },
+    } }),
+    'make.js': "import fs from 'node:fs'; fs.mkdirSync('gen',{recursive:true}); fs.writeFileSync('gen/out.txt', fs.readFileSync('seed.txt'));\n",
+    'seed.txt': 'v1', 'package.json': '{"type":"module"}',
+  };
+  const dir = await tmpProject(files);
+  try {
+    await run(dir, ['bystander']);
+    await run(dir, ['consumer']);
+    assert.equal(task(await run(dir, ['bystander']), 'bystander').state, 'cached', 'producer output must not leak into bystander inputs');
+    await fs.writeFile(path.join(dir, 'seed.txt'), 'v2');
+    const r = await run(dir, ['consumer']);
+    assert.equal(task(r, 'producer').state, 'succeeded');
+    assert.equal(task(r, 'consumer').state, 'succeeded', 'consumer depends on producer and reads gen/**');
+    assert.equal(task(await run(dir, ['consumer']), 'consumer').state, 'cached');
+  } finally { await rm(dir); }
+});

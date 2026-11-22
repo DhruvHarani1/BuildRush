@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Cache } from './cache.js';
 import { Config, findProjectRoot, loadConfig } from './config.js';
+import { resolveAdapter } from './adapters.js';
 import { FileIndex } from './fsindex.js';
 import { DepGraph, SerializedGraph } from './graph.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
@@ -25,6 +26,24 @@ export class Project {
     if (!found) throw new Error(`no buildrush.json found in ${start} or any parent directory (run \`buildrush init\`)`);
     const root = await fs.realpath(found);
     const config = await loadConfig(root);
+    for (const t of Object.values(config.tasks)) {
+      if (!t.adapter) continue;
+      const cwd = t.cwd === '.' ? root : path.join(root, t.cwd);
+      let r;
+      try {
+        r = await resolveAdapter(t.adapter, cwd, t);
+      } catch (e) {
+        throw new Error(`tasks.${t.name} (adapter ${t.adapter}): ${(e as Error).message}`);
+      }
+      t.command = r.command;
+      t.inputs ??= r.inputs;
+      const userOutputs = t.outputs.length > 0;
+      if (!userOutputs) t.outputs = r.outputs;
+      t.env = [...new Set([...t.env, ...r.env])];
+      t.envPrefixes = r.envPrefixes;
+      if (!r.cache && !userOutputs) t.cache = false;
+      t.notes = r.notes;
+    }
     const stateDir = path.join(root, '.buildrush', 'state');
     const cacheDir = process.env.BUILDRUSH_CACHE_DIR
       ? path.resolve(process.env.BUILDRUSH_CACHE_DIR)

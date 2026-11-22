@@ -284,6 +284,7 @@ async function cmdRun(names: string[], f: Flags, signal: AbortSignal): Promise<n
       const bad = r.state === 'failed' || r.state === 'cancelled';
       if (f.quiet && !bad) return;
       console.log(line(r, f.verbose));
+      for (const d of r.diagnostics.slice(0, 10)) console.log(`    ! ${d}`);
       if (r.log && (r.state === 'failed' || f.verbose)) console.log(r.log.replace(/\n$/, '').split('\n').map((l) => '    | ' + l).join('\n'));
     },
   });

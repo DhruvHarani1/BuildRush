@@ -57,6 +57,7 @@ export async function runDoctor(start: string): Promise<Check[]> {
     if (!t.cache) notes.push('caching disabled by config');
     else if (t.kind === 'build' && t.outputs.length === 0) notes.push('build task declares no outputs: results are cached as success markers only');
     if (t.inputs === null) notes.push('no inputs declared: whole project is hashed (correct but invalidates broadly)');
+    if (t.adapter) notes.push(...t.notes.map((n) => `[${t.adapter}] ${n}`));
     if (t.passEnv.length) notes.push(`passEnv ${t.passEnv.join(',')} is NOT part of the cache key`);
     add(`task:${t.name}`, notes.length ? 'warn' : 'ok', notes.join('; ') || 'ready, cacheable');
   }

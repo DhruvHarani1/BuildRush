@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Components, ManifestEntry, CacheCorruptError, ActionRecord } from './cache.js';
 import { TaskConfig } from './config.js';
+import { ADAPTER_PACKAGE, diagnostics as adapterDiagnostics, toolVersion } from './adapters.js';
 import { Project } from './project.js';
 import { isSecretName, makeRedactor, resolveExecutable, runCommand } from './runner.js';
 import { detectCycle, schedule, TaskState } from './scheduler.js';
@@ -24,6 +25,8 @@ export interface TaskReport {
   savedMsEstimate: number;
   exitCode: number | null;
   log: string;
+  /** Concise, tool-aware failure summary (display only). */
+  diagnostics: string[];
 }
 
 export interface RunReport {
@@ -89,7 +92,22 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
 
   const history = (await readJson<Record<string, number>>(path.join(project.stateDir, 'history.json'))) ?? {};
   const secretKey = await cache.secretKey();
-  const isOutputOf = project.outputMatcher();
+  // A task may only consume another task's outputs if it (transitively) depends on that task.
+  // Everything else's artifacts (and its own outputs) are never inputs, whatever the globs match.
+  const transitiveDeps = (n: string, acc = new Set<string>()): Set<string> => {
+    for (const d of config.tasks[n]!.dependsOn) if (!acc.has(d)) { acc.add(d); transitiveDeps(d, acc); }
+    return acc;
+  };
+  const foreignOutputs = new Map<string, (rel: string) => boolean>();
+  const isOutputOf = (name: string) => {
+    let m = foreignOutputs.get(name);
+    if (!m) {
+      const deps = transitiveDeps(name);
+      m = compileGlobs(Object.values(config.tasks).filter((x) => x.name === name || !deps.has(x.name)).flatMap((x) => x.outputs));
+      foreignOutputs.set(name, m);
+    }
+    return m;
+  };
 
   // ---- affected-test selection (before scheduling) -------------------------------------------
   let selection: Selection | null = null;
@@ -141,11 +159,16 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
   };
   const blank = (task: string): TaskReport => ({
     task, state: 'pending', cache: 'n/a', reasons: [], notes: [], fingerprint: null, durationMs: 0,
-    restoredBytes: 0, storedBytes: 0, savedMsEstimate: 0, exitCode: null, log: '',
+    restoredBytes: 0, storedBytes: 0, savedMsEstimate: 0, exitCode: null, log: '', diagnostics: [],
   });
 
   const exec = async (name: string, signal: AbortSignal): Promise<'succeeded' | 'cached' | 'failed' | 'skipped'> => {
-    const t = config.tasks[name]!;
+    const declared = config.tasks[name]!;
+    // Adapter env prefixes (e.g. VITE_) expand to every matching variable that is actually set.
+    const t: TaskConfig = {
+      ...declared,
+      env: [...new Set([...declared.env, ...Object.keys(process.env).filter((k) => declared.envPrefixes.some((p) => k.startsWith(p)))])].sort(),
+    };
     const rep = blank(name);
     const t0 = Date.now();
     try {
@@ -167,8 +190,9 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
         return 'failed';
       }
       const args = extraArgs.get(name) ?? [];
-      const inputs = resolveInputs(project, t, isOutputOf);
+      const inputs = resolveInputs(project, t, isOutputOf(name));
       const components = await buildComponents(project, t, args, inputs, exe, fingerprints, secretKey);
+      if (t.adapter) components.toolchain[t.adapter] = await toolVersion(root, taskCwd, ADAPTER_PACKAGE[t.adapter]);
       const fp = sha256(canonical(components));
       rep.fingerprint = fp;
       fingerprints.set(name, fp);
@@ -225,6 +249,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
       rep.durationMs = res.durationMs;
       rep.exitCode = res.exitCode;
       rep.log = res.log;
+      if (res.exitCode !== 0) rep.diagnostics = adapterDiagnostics(t.adapter, res.log);
       if (res.spawnError) rep.notes.push(`failed to start: ${res.spawnError}`);
       if (res.timedOut) rep.notes.push(`timed out after ${t.timeoutMs}ms`);
       if (res.cancelled) {
@@ -255,7 +280,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
       if (cacheable && manifest) {
         await lockedScan();
         dirty = false;
-        const after = resolveInputs(project, t, isOutputOf);
+        const after = resolveInputs(project, t, isOutputOf(name));
         const changed = diffInputs(components.inputs, after.map((p) => [p, project.index.files.get(p)!.digest] as const));
         if (changed.length) {
           rep.cache = 'uncacheable';
@@ -336,12 +361,11 @@ export function buildEnv(t: TaskConfig, parent: NodeJS.ProcessEnv): Record<strin
   return env;
 }
 
-function resolveInputs(project: Project, t: TaskConfig, isAnyOutput: (rel: string) => boolean): string[] {
-  const ownOutputs = compileGlobs(t.outputs);
+function resolveInputs(project: Project, t: TaskConfig, isExcludedOutput: (rel: string) => boolean): string[] {
   const all = [...project.index.files.keys()];
-  if (t.inputs === null) return all.filter((f) => !isAnyOutput(f));
+  if (t.inputs === null) return all.filter((f) => !isExcludedOutput(f));
   const match = compileGlobs(t.inputs);
-  return all.filter((f) => match(f) && !ownOutputs(f));
+  return all.filter((f) => match(f) && !isExcludedOutput(f));
 }
 
 async function buildComponents(

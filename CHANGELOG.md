@@ -14,5 +14,12 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - JS/TS import graph (relative, tsconfig paths, workspaces, re-exports, dynamic imports) and `--affected` test selection with conservative fallbacks.
 - Security docs, CI, CodeQL, OpenSSF Scorecard, dependency review, provenance-enabled release workflow, hardened Dockerfile.
 
+- Adapters (`vite`, `vitest`, `tsc`, `eslint`): tool-aware inputs (incl. `.env*`, `VITE_*`), outDir discovery, tool-version fingerprinting, refusal of uncacheable modes, failure diagnostics. See docs/adapters.md.
+- Benchmark suite (`bench/`) with native-sequential and native-parallel baselines and a restored-build equality check.
+- `scripts/apply-github-security.sh`: idempotent repository hardening (branch protection, rulesets, Actions policy).
+
+### Fixed
+- A task's inputs could include another, unrelated task's outputs (found by the benchmark suite).
+
 ### Not yet implemented
 Watch mode, daemon, Vite/Vitest-specific adapters, coverage-informed selection, remote cache, Windows support. See ROADMAP.md.

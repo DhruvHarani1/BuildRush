@@ -14,6 +14,7 @@ Unknown keys are errors, not silently ignored. Run `buildrush config validate`.
   "tests": { "patterns": ["**/*.{test,spec}.{ts,tsx,js,jsx}"] },
   "tasks": {
     "build": {
+      "adapter": "vite",                // optional: vite | vitest | tsc | eslint (see adapters.md). With an adapter, command/inputs/outputs/env default sensibly
       "command": "vite build",          // string (no shell syntax allowed) or ["argv", "array"]
       "kind": "build",                  // build | test | check | run (default run)
       "dependsOn": ["typecheck"],
@@ -31,6 +32,8 @@ Unknown keys are errors, not silently ignored. Run `buildrush config validate`.
   "pipelines": { "default": ["typecheck", "build"] }
 }
 ```
+
+**Inputs and other tasks' outputs.** A task never sees another task's declared `outputs` as inputs unless it (transitively) `dependsOn` that task.
 
 Globs: `**`, `*`, `?`, `{a,b}`; a trailing `/` means "everything beneath".
 Patterns must be project-relative and may not contain `..`.

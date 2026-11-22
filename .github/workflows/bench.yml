@@ -1,0 +1,21 @@
+name: Benchmarks (manual)
+on:
+  workflow_dispatch:
+    inputs:
+      workload: { description: 'small | medium | assets', default: small, required: true }
+permissions: {}
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci && npm run build
+      - run: node bench/run.mjs --workload "$WORKLOAD" --runs 7
+        env: { WORKLOAD: '${{ inputs.workload }}' }
+      - uses: actions/upload-artifact@v4
+        with: { name: bench-results, path: bench/results/ }
