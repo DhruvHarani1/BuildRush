@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { DIGEST_RE, hashFile, sha256 } from './util/hash.js';
 import { assertNoSymlinkInPath, resolveInside, safeRelative, UnsafePathError } from './util/paths.js';
-import { readJson, tmpName, writeFileAtomic } from './util/fsx.js';
+import { readJson, renameRetry, tmpName, writeFileAtomic } from './util/fsx.js';
 
 export interface ManifestEntry {
   path: string;
@@ -105,7 +105,14 @@ export class Cache {
       // The file may have changed between hashing and copying: never store mislabelled content.
       if ((await hashFile(tmp)) !== digest) throw new Error(`file changed while being cached: ${abs}`);
       await fs.chmod(tmp, 0o600);
-      await fs.rename(tmp, dest);
+      try {
+        await renameRetry(tmp, dest);
+      } catch (e) {
+        // Content-addressed: if a concurrent writer already committed identical, verified content, we are done.
+        if (!(await hashFile(dest).then((h) => h === digest, () => false))) throw e;
+        await fs.rm(tmp, { force: true });
+        return false;
+      }
       return true;
     } catch (e) {
       await fs.rm(tmp, { force: true });
@@ -192,7 +199,7 @@ export class Cache {
       try {
         await fs.copyFile(this.blobPath(p.entry.digest), tmp);
         await fs.chmod(tmp, p.entry.mode & 0o777);
-        await fs.rename(tmp, p.abs);
+        await renameRetry(tmp, p.abs);
       } catch (e) {
         await fs.rm(tmp, { force: true });
         throw e;

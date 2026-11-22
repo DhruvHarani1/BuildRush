@@ -7,7 +7,7 @@ exactly why anything ran.
 
 > **Status: early (0.1).** The core engine is real and tested (60 tests,
 > including adversarial cache/path/secret tests). Watch mode, daemon,
-> tool-specific adapters and Windows support are **not built yet**; see
+> tool-specific adapters are **not built yet**; see
 > [ROADMAP.md](ROADMAP.md). No benchmark claims are made until the benchmark
 > suite exists.
 
@@ -61,7 +61,7 @@ What this says honestly: the cache pays off when nothing relevant changed (the c
 
 ## Requirements
 
-Node.js ≥ 22 on Linux or macOS (Windows untested). Zero runtime dependencies.
+Node.js ≥ 22 on Linux, macOS and Windows (CI runs all three). On Windows, npm `.cmd` shims are unwrapped and their Node target is run directly; arguments are never passed through `cmd.exe`. Zero runtime dependencies.
 **Do not run BuildRush on repositories you do not trust**: the config runs commands as you.
 
 ## License
