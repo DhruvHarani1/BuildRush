@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # TODO(maintainer): pin both FROM lines by digest (see docs/MAINTAINER_CHECKLIST.md).
-FROM node:22-slim AS build
+FROM node:26-slim AS build
 WORKDIR /src
 COPY package.json package-lock.json .npmrc tsconfig.json ./
 RUN npm ci
@@ -9,7 +9,7 @@ COPY test ./test
 COPY bin ./bin
 RUN npm run build && npm prune --omit=dev
 
-FROM node:22-slim
+FROM node:26-slim
 LABEL org.opencontainers.image.source="https://github.com/DhruvHarani1/BuildRush" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.description="BuildRush: local-first incremental build and test engine"
