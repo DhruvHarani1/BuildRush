@@ -1,0 +1,8 @@
+# Every change needs review from a code owner (enforce via branch protection).
+*                         @DhruvHarani1
+/src/cache.ts             @DhruvHarani1
+/src/util/paths.ts        @DhruvHarani1
+/src/runner.ts            @DhruvHarani1
+/.github/                 @DhruvHarani1
+/SECURITY.md              @DhruvHarani1
+/docs/security.md         @DhruvHarani1

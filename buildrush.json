@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "project": { "name": "buildrush" },
+  "tasks": {
+    "typecheck": {
+      "command": "tsc -p tsconfig.json --noEmit",
+      "kind": "check",
+      "inputs": ["src/**", "test/**", "tsconfig.json", "package.json", "package-lock.json"]
+    },
+    "build": {
+      "command": "tsc -p tsconfig.json",
+      "kind": "build",
+      "inputs": ["src/**", "test/**", "tsconfig.json", "package.json", "package-lock.json"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "command": ["node", "--test", "dist/test/**/*.test.js"],
+      "kind": "test",
+      "dependsOn": ["build"],
+      "inputs": ["src/**", "test/**", "bin/**", "package.json", "tsconfig.json"],
+      "affected": false
+    }
+  },
+  "pipelines": { "default": ["typecheck", "build", "test"], "check": ["typecheck"] }
+}
