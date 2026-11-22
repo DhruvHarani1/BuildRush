@@ -100,7 +100,7 @@ export interface ImpactResult {
 }
 
 /** Files whose change can alter ANY task or test in ways imports cannot express. */
-const GLOBAL_CONFIG = [
+export const GLOBAL_CONFIG = [
   'package.json', '**/package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
   'tsconfig*.json', '**/tsconfig*.json', 'buildrush.json', '.env', '.env.*', '**/.env', '**/.env.*',
   'vitest.config.*', 'vite.config.*', 'jest.config.*', '**/vitest.config.*', '**/vite.config.*', '**/jest.config.*',
