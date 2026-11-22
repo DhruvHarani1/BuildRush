@@ -42,6 +42,7 @@ call PUT "branches/$BRANCH/protection" '{
   "required_status_checks": {"strict": true, "contexts": [
     "test (ubuntu-latest, node 22)", "test (ubuntu-latest, node 24)",
     "test (macos-latest, node 22)", "test (macos-latest, node 24)",
+    "test (windows-latest, node 22)", "test (windows-latest, node 24)",
     "audit", "analyze", "review"]},
   "enforce_admins": false,
   "required_pull_request_reviews": {"required_approving_review_count": 1, "require_code_owner_reviews": true,
