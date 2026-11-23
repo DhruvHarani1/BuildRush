@@ -11,7 +11,7 @@ import { DaemonServer, AlreadyRunningError } from '../src/daemon/server.js';
 import {
   acquireLock, Credentials, DaemonError, DaemonUnavailable, probeDaemon, readCredentials, removeEndpointFiles, sendRequest, spawnDaemon, stopDaemon,
 } from '../src/daemon/client.js';
-import { daemonDirs, DaemonDirs } from '../src/daemon/paths.js';
+import { daemonDirs, DaemonDirs, resolveBaseDir } from '../src/daemon/paths.js';
 import { clientEnv, tryDaemon } from '../src/daemon/cli.js';
 import { caseInsensitiveEnv } from '../src/daemon/server.js';
 import { Message, PROTO, VERSION } from '../src/daemon/protocol.js';
@@ -643,4 +643,24 @@ test('Windows: environment lookups are case-insensitive for PATH and declared na
   assert.equal(env.PATH, 'C:\\x');
   assert.equal(env.MY_VAR, 'v');
   assert.deepEqual(Object.keys(env).sort(), ['Path', 'my_var']);
+});
+
+test('state directory never falls back to the shared temp directory', () => {
+  const tmp = os.tmpdir();
+  const inTmp = (p: string) => {
+    const rel = path.relative(tmp, p);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  if (WIN) {
+    const b = resolveBaseDir({ LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' });
+    assert.equal(b, path.join('C:\\Users\\u\\AppData\\Local', 'BuildRush', 'daemon'));
+    assert.throws(() => resolveBaseDir({}), /no per-user location/);
+  } else {
+    assert.equal(resolveBaseDir({ HOME: '/home/u' }), path.join('/home/u', '.cache', 'buildrush', 'run'));
+    assert.equal(resolveBaseDir({ HOME: '/home/u', XDG_CACHE_HOME: '/x/cache' }), path.join('/x/cache', 'buildrush', 'run'));
+    // an XDG_RUNTIME_DIR that is not ours/0700 (here: a nonexistent one) is ignored, not trusted
+    assert.equal(resolveBaseDir({ HOME: '/home/u', XDG_RUNTIME_DIR: '/nonexistent-run-dir' }), path.join('/home/u', '.cache', 'buildrush', 'run'));
+    assert.throws(() => resolveBaseDir({}), /no per-user location/);
+    assert.ok(!inTmp(resolveBaseDir({ HOME: '/home/u' })));
+  }
 });

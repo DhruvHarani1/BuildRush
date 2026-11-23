@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { constants as fsc } from 'node:fs';
+import { constants as fsc, lstatSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -9,9 +9,11 @@ import { execFile } from 'node:child_process';
  * Where a project's daemon keeps its endpoint, token and metadata.
  *
  * Everything lives in a per-user directory OUTSIDE the project tree:
- *   POSIX   $XDG_RUNTIME_DIR/buildrush            (tmpfs, 0700, already per-user), else
- *           <os.tmpdir()>/buildrush-<uid>
- *   Windows %LOCALAPPDATA%\BuildRush\daemon        (per-user profile ACL), else <os.tmpdir()>\buildrush-daemon
+ *   POSIX   $XDG_RUNTIME_DIR/buildrush            (only if that directory is ours and mode 0700), else
+ *           ${XDG_CACHE_HOME:-~/.cache}/buildrush/run   (under the user's own home)
+ *   Windows %LOCALAPPDATA%\BuildRush\daemon        (per-user profile ACL)
+ * Never the shared temp directory: if no private per-user location exists the daemon is unavailable
+ * (callers fall back to one-shot), it is not relocated to /tmp.
  *   override: BUILDRUSH_DAEMON_DIR (tests, unusual setups); validated exactly like the defaults.
  * Each project gets its own 0700 subdirectory keyed by a hash of its realpath.
  */
@@ -53,11 +55,24 @@ export function projectKey(root: string): string {
 export function resolveBaseDir(env: NodeJS.ProcessEnv = process.env): string {
   if (env.BUILDRUSH_DAEMON_DIR) return path.resolve(env.BUILDRUSH_DAEMON_DIR);
   if (isWin) {
-    return env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'BuildRush', 'daemon') : path.join(os.tmpdir(), 'buildrush-daemon');
+    if (env.LOCALAPPDATA && path.isAbsolute(env.LOCALAPPDATA)) return path.join(env.LOCALAPPDATA, 'BuildRush', 'daemon');
+    throw new Error('no per-user location for daemon state (LOCALAPPDATA is not set)');
   }
-  if (env.XDG_RUNTIME_DIR && path.isAbsolute(env.XDG_RUNTIME_DIR)) return path.join(env.XDG_RUNTIME_DIR, 'buildrush');
-  const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
-  return path.join(os.tmpdir(), `buildrush-${uid}`);
+  const rt = env.XDG_RUNTIME_DIR;
+  if (rt && path.isAbsolute(rt) && privateOwnDir(rt)) return path.join(rt, 'buildrush');
+  const cacheHome = env.XDG_CACHE_HOME && path.isAbsolute(env.XDG_CACHE_HOME) ? env.XDG_CACHE_HOME : env.HOME && path.isAbsolute(env.HOME) ? path.join(env.HOME, '.cache') : null;
+  if (!cacheHome) throw new Error('no per-user location for daemon state (set XDG_RUNTIME_DIR, XDG_CACHE_HOME or HOME)');
+  return path.join(cacheHome, 'buildrush', 'run');
+}
+
+/** XDG_RUNTIME_DIR is only trusted if it is a real directory owned by us with no group/other access. */
+function privateOwnDir(dir: string): boolean {
+  try {
+    const st = lstatSync(dir);
+    return st.isDirectory() && (typeof process.getuid !== 'function' || st.uid === process.getuid()) && (st.mode & 0o077) === 0;
+  } catch {
+    return false;
+  }
 }
 
 /** sun_path is 104 bytes on macOS/BSD and 108 on Linux; stay below the smaller. */
@@ -67,19 +82,22 @@ export function daemonDirs(root: string, env: NodeJS.ProcessEnv = process.env): 
   const base = resolveBaseDir(env);
   const key = projectKey(root);
   const dir = path.join(base, key);
+  let socket = path.join(dir, 's');
+  if (!isWin && Buffer.byteLength(socket) > MAX_SOCKET_PATH) socket = path.join(base, `${key.slice(0, 8)}.s`); // shorter, still inside the 0700 base
+  if (!isWin) assertSocketPathFits(socket); // too long even so: daemon unavailable, never relocated to /tmp
   return {
     base, dir, key,
     token: path.join(dir, 'token'),
     meta: path.join(dir, 'daemon.json'),
     log: path.join(dir, 'log'),
     lock: path.join(dir, 'starting'),
-    socket: path.join(dir, 's'),
+    socket,
   };
 }
 
 export function assertSocketPathFits(p: string): void {
   if (!isWin && Buffer.byteLength(p) > MAX_SOCKET_PATH) {
-    throw new Error(`daemon socket path is too long for this OS (${Buffer.byteLength(p)} > ${MAX_SOCKET_PATH} bytes): ${p}; set BUILDRUSH_DAEMON_DIR to a shorter directory`);
+    throw new Error(`daemon socket path is too long for this OS (${Buffer.byteLength(p)} > ${MAX_SOCKET_PATH} bytes): ${p}; the daemon is disabled for this project (set BUILDRUSH_DAEMON_DIR to a shorter private directory)`);
   }
 }
 

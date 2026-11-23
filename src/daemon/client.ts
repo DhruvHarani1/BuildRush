@@ -175,7 +175,7 @@ export async function acquireLock(dirs: DaemonDirs, o: { timeoutMs?: number; onW
   while (Date.now() < deadline) {
     try {
       await fs.mkdir(dirs.lock);
-      await fs.writeFile(`${dirs.lock}/owner`, nonce);
+      await fs.writeFile(`${dirs.lock}/owner`, nonce, { flag: 'wx', mode: 0o600 });
       return async () => {
         const cur = await fs.readFile(`${dirs.lock}/owner`, 'utf8').catch(() => null);
         if (cur === nonce) await fs.rm(dirs.lock, { recursive: true, force: true });

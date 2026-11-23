@@ -21,7 +21,8 @@ An **optional local daemon** (`--daemon` / `BUILDRUSH_DAEMON=1`, off by default;
 threat model in [daemon.md](daemon.md)) adds one IPC surface: a Unix domain socket (POSIX) or named
 pipe (Windows), reachable only by the current user, whose every connection must present a
 per-daemon 256-bit token held in a `0600` file inside a per-user `0700` directory outside the
-project tree. It accepts a closed set of operations (`ping`, `status`, `run`, `analyze`,
+project tree (`XDG_RUNTIME_DIR`, else `~/.cache/buildrush/run`; `%LOCALAPPDATA%` on Windows; never the
+shared temp directory). It accepts a closed set of operations (`ping`, `status`, `run`, `analyze`,
 `cacheStats`, `stop`) that name existing tasks and run them through the same engine, cache
 validation and resource limits as a one-shot run. A same-user attacker is still out of scope:
 whoever can read the token can already run your tasks or edit your config.

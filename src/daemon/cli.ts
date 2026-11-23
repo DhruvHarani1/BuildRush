@@ -105,7 +105,13 @@ export async function tryDaemon<T>(
 export async function cmdDaemon(sub: string | undefined, startDir: string, f: DaemonFlags, rest: string[]): Promise<number> {
   if (sub === '__serve') return serve(startDir);
   if (sub !== 'start' && sub !== 'stop' && sub !== 'status') throw new Error('usage: buildrush daemon start|stop|status');
-  const loc = await locate(startDir);
+  let loc: Awaited<ReturnType<typeof locate>>;
+  try {
+    loc = await locate(startDir);
+  } catch (e) {
+    console.error(`buildrush: daemon unavailable: ${(e as Error).message}`);
+    return 1;
+  }
   if (!loc) throw new Error('no buildrush.json found (run `buildrush init`)');
   const { root, dirs } = loc;
   const say = (human: string, json: unknown) => (f.json ? console.log(JSON.stringify(json, null, 2)) : console.log(human));

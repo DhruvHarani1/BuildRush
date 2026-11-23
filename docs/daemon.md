@@ -40,8 +40,13 @@ crash handling. The decisions below keep the security model unchanged
 
    | OS | Directory |
    | --- | --- |
-   | Linux/macOS | `$XDG_RUNTIME_DIR/buildrush/<key>/`, else `<os.tmpdir()>/buildrush-<uid>/<key>/` |
-   | Windows | `%LOCALAPPDATA%\BuildRush\daemon\<key>\`, else `<os.tmpdir()>\buildrush-daemon\<key>\` |
+   | Linux/macOS | `$XDG_RUNTIME_DIR/buildrush/<key>/` (only if that directory is owned by you and mode 0700), else `${XDG_CACHE_HOME:-~/.cache}/buildrush/run/<key>/` |
+   | Windows | `%LOCALAPPDATA%\BuildRush\daemon\<key>\` |
+
+   **The shared temp directory is never used**: it is world-writable and predictable. If no private
+   per-user location can be determined (no `HOME`/`XDG_*`/`LOCALAPPDATA`), or the Unix socket path would exceed
+   the OS limit (~104 bytes macOS, 108 Linux; a shorter `<base>/<key8>.s` name inside the 0700 base is tried
+   first), the daemon is reported unavailable (`daemon start` says why; `--daemon` falls back to one-shot).
 
    `BUILDRUSH_DAEMON_DIR` overrides the base (tests, odd setups) and is validated identically.
    Contents: `token`, `daemon.json` (pid, endpoint, versions; its presence means "ready"),
