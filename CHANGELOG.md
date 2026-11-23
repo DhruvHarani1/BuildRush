@@ -18,8 +18,10 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - Benchmark suite (`bench/`) with native-sequential and native-parallel baselines and a restored-build equality check.
 - `scripts/apply-github-security.sh`: idempotent repository hardening (branch protection, rulesets, Actions policy).
 
+- Watch mode: `run|build|test|check --watch` keeps the Project, index and graph in memory, re-runs only affected work on each change (unchanged tasks are `[cached]`), cancels obsolete in-flight runs, reconciles by content digest on a timer and after watcher errors, and with `--json` prints one object per cycle. See docs/architecture.md.
+
 ### Fixed
 - A task's inputs could include another, unrelated task's outputs (found by the benchmark suite).
 
 ### Not yet implemented
-Watch mode, daemon, Vite/Vitest-specific adapters, coverage-informed selection, remote cache, Windows support. See ROADMAP.md.
+Daemon (watch mode itself is shipped), Vite/Vitest-specific adapters, coverage-informed selection, remote cache, Windows support. See ROADMAP.md.
