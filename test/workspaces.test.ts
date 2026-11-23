@@ -128,6 +128,41 @@ test('root lockfile, root package.json and a package manifest invalidate as docu
   } finally { await rm(dir); }
 });
 
+test('root tool configs and declared rootInputs invalidate package tasks that declare package-relative inputs', async () => {
+  const dir = await tmpProject(monorepo({
+    config: {
+      tasks: {
+        build: { scope: 'packages', command: 'node ../../scripts/build.js', inputs: ['src/**'], outputs: ['dist/**'], rootInputs: ['scripts/**'], dependsOn: ['^build'] },
+      },
+      pipelines: { default: ['build'] },
+    },
+    files: { 'vitest.config.mjs': 'export default {};\n', 'notes.md': 'hello\n' },
+  }));
+  const ALL_BUILD = ALL.filter((t) => t.endsWith(':build'));
+  try {
+    await run(dir);
+    // Unrelated root file: nothing re-runs.
+    await fs.writeFile(path.join(dir, 'notes.md'), 'changed\n');
+    assert.deepEqual(only(await run(dir), 'cached'), ALL_BUILD);
+    // A root tool config (vitest/vite/jest/eslint/babel/...) is shared by every package.
+    await fs.writeFile(path.join(dir, 'vitest.config.mjs'), 'export default { test: {} };\n');
+    assert.deepEqual(only(await run(dir), 'succeeded'), ALL_BUILD);
+    assert.deepEqual(only(await run(dir), 'cached'), ALL_BUILD);
+    // The task's own script outside the packages is declared with rootInputs.
+    await fs.appendFile(path.join(dir, 'scripts/build.js'), '\n// edited\n');
+    assert.deepEqual(only(await run(dir), 'succeeded'), ALL_BUILD);
+  } finally { await rm(dir); }
+});
+
+test('rootInputs: only valid on package tasks, project-relative, no "..", validated like inputs', () => {
+  const base = { command: 'node -v', scope: 'packages' };
+  const bad = (t: Record<string, unknown>) => validateConfig({ version: 1, project: { name: 'x' }, tasks: { t } });
+  assert.throws(() => bad({ command: 'node -v', rootInputs: ['a'] }), /rootInputs.*only valid.*scope "packages"/);
+  assert.throws(() => bad({ ...base, rootInputs: ['../a'] }), /rootInputs/);
+  assert.throws(() => bad({ ...base, rootInputs: 'a' }), /rootInputs/);
+  assert.doesNotThrow(() => bad({ ...base, rootInputs: ['scripts/**'] }));
+});
+
 test('--affected selects changed packages and their dependents (transitively), pulling dependencies from cache', async () => {
   const dir = await tmpProject(monorepo());
   try {
@@ -326,6 +361,44 @@ test('workspace imports resolve through package.json exports/main onto sources (
     const sel = selectPackages(p.workspace!, g, null, ['packages/lib/src/utils/str.ts']);
     assert.deepEqual(sel.affected, ['@w/consumer', '@w/lib']);
     assert.deepEqual(sel.skipped, ['@w/main']);
+  } finally { await rm(dir); }
+});
+
+test('a trailing "/**" pattern also matches the directory itself (pnpm: "docs/**" includes docs/package.json)', async () => {
+  const dir = await tmpProject({
+    'pnpm-workspace.yaml': "packages:\n  - 'packages/*'\n  - 'docs/**'\n  - '!**/test/**'\n",
+    'package.json': '{"name":"root"}',
+    'packages/a/package.json': '{"name":"a"}',
+    'docs/package.json': '{"name":"docs-site"}',
+    'docs/demos/x/package.json': '{"name":"demo-x"}',
+    'packages/a/test/fixture/package.json': '{"name":"fixture"}',
+    'packages/a/test/package.json': '{"name":"test-dir-itself"}',
+  });
+  try {
+    const ws = (await discoverWorkspaces(dir))!;
+    assert.deepEqual(ws.packages.map((p) => p.name), ['docs-site', 'demo-x', 'a']);
+  } finally { await rm(dir); }
+});
+
+test('peerDependencies on workspace packages are ordering edges, unless they would close a cycle', async () => {
+  const dir = await tmpProject({
+    'package.json': JSON.stringify({ name: 'root', workspaces: ['packages/*'] }),
+    'packages/core/package.json': '{"name":"@p/core"}',
+    'packages/ui/package.json': '{"name":"@p/ui","dependencies":{"@p/core":"workspace:^"}}',
+    'packages/utils/package.json': '{"name":"@p/utils","dependencies":{"@p/core":"workspace:^"},"peerDependencies":{"@p/ui":"workspace:*","react":"^18"}}',
+    'packages/host/package.json': '{"name":"@p/host","devDependencies":{"@p/plugin":"workspace:*"}}',
+    'packages/plugin/package.json': '{"name":"@p/plugin","peerDependencies":{"@p/host":"workspace:*"}}',
+  });
+  try {
+    const ws = (await discoverWorkspaces(dir))!;
+    assert.deepEqual(ws.get('@p/utils')!.workspaceDeps, ['@p/core', '@p/ui']);
+    assert.deepEqual(ws.transitiveDeps('@p/utils'), ['@p/core', '@p/ui']);
+    assert.deepEqual(ws.dependentsOf('@p/ui'), ['@p/utils']);
+    // host -> plugin is declared; plugin's peer on host would make a cycle, so it is dropped (with a warning).
+    assert.deepEqual(ws.get('@p/host')!.workspaceDeps, ['@p/plugin']);
+    assert.deepEqual(ws.get('@p/plugin')!.workspaceDeps, []);
+    assert.equal(ws.findCycle(), null);
+    assert.ok(ws.warnings.some((w) => /plugin\/package\.json.*peerDependency "@p\/host"/.test(w)), ws.warnings.join('|'));
   } finally { await rm(dir); }
 });
 

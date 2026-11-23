@@ -4,7 +4,11 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Fixed
+- Workspaces (found by running on mobx, preactjs/signals, TanStack/store): `docs/**` package globs now match `docs/` itself; `peerDependencies` on workspace packages are ordering edges (dropped with a warning if they would close a cycle); root tool configs (`vitest.config.*`, `eslint.config.*`, ...) invalidate package tasks; vitest coverage enabled in the config is captured as an output.
+
 ### Added
+- Package tasks: `rootInputs` (project-relative files outside the package that every instance hashes).
 - Workspaces: detection of npm/yarn/bun (`package.json` `workspaces`) and pnpm (`pnpm-workspace.yaml`) layouts, package discovery, per-package task expansion (`"scope": "packages"`, `"packages"` name filter, `^task` dependencies ordered by the package graph, package dependency cycle errors), package-aware module graph (imports of workspace packages resolve via `exports`/`main` onto sources), package-scoped `--affected` (changed packages plus transitive dependents), `graph --packages`, and workspace info in `analyze`/`explain`. See docs/configuration.md.
 - CLI: `init`, `analyze`, `graph`, `run`, `build`, `test`, `check`, `explain`, `cache stats|verify|clean`, `doctor`, `config validate`.
 - Strict `buildrush.json` schema with path-qualified validation errors; commands run without a shell.
