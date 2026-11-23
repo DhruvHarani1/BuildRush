@@ -4,8 +4,7 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-### Fixed
-- Workspaces (found by running on mobx, preactjs/signals, TanStack/store): `docs/**` package globs now match `docs/` itself; `peerDependencies` on workspace packages are ordering edges (dropped with a warning if they would close a cycle); root tool configs (`vitest.config.*`, `eslint.config.*`, ...) invalidate package tasks; vitest coverage enabled in the config is captured as an output.
+## [0.1.1] - 2026-11-23
 
 ### Added
 - Package tasks: `rootInputs` (project-relative files outside the package that every instance hashes).
@@ -29,6 +28,13 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - Watch mode: `run|build|test|check --watch` keeps the Project, index and graph in memory, re-runs only affected work on each change (unchanged tasks are `[cached]`), cancels obsolete in-flight runs, reconciles by content digest on a timer and after watcher errors, and with `--json` prints one object per cycle. See docs/architecture.md.
 
 ### Fixed
+- Workspaces (found by running on mobx, preactjs/signals, TanStack/store): `docs/**` package globs now match `docs/` itself; `peerDependencies` on workspace packages are ordering edges (dropped with a warning if they would close a cycle); root tool configs (`vitest.config.*`, `eslint.config.*`, ...) invalidate package tasks; vitest coverage enabled in the config is captured as an output.
+- Windows: npm-installed tools (`tsc`, `vite`, `vitest`) could not be started at all (`spawn EINVAL` on `.cmd` shims). Shims are now unwrapped to their Node entry point and run with `node`; unrecognised `.cmd`/`.bat` files are refused, never passed through `cmd.exe`.
+- Windows: concurrent cache writes of identical content failed with `EPERM` on rename; renames retry briefly and treat an already-stored, digest-verified blob as success.
+- Security: the glob matcher took exponential time on adversarial config patterns (ReDoS); it is now a linear-time NFA matcher.
+- Security: the import scanner could take cubic time on long whitespace runs (CodeQL js/polynomial-redos); replaced with a bounded linear scan.
+- Path validation accepted `./` and drive-relative segments; cache keys ignored a file literally named `__proto__`; workspace `exports` targets replaced only the first `*`.
+- `buildrush doctor` no longer warns that Windows is untested.
 - A long-lived process could reuse a stale executable digest after the binary was replaced: the digest memo is now keyed by file identity.
 - A task's inputs could include another, unrelated task's outputs (found by the benchmark suite).
 

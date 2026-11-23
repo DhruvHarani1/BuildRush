@@ -1,6 +1,6 @@
 {
   "name": "buildrush",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first incremental build, test and developer execution engine: content-addressed caching, dependency-aware affected-test selection, bounded parallel scheduling.",
   "license": "MIT",
   "type": "module",
