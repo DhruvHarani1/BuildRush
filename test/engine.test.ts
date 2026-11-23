@@ -211,7 +211,7 @@ test('independent tasks run concurrently, bounded by capacity', async () => {
     ].join('\n'),
   };
   // simpler & robust: each task records its start/end timestamps in the log; compare windows.
-  files['scripts/slow.js'] = "const s = Date.now(); await new Promise((r) => setTimeout(r, 300)); console.log(JSON.stringify([s, Date.now()]));\n";
+  files['scripts/slow.js'] = "const s = Date.now(); await new Promise((r) => setTimeout(r, 1000)); console.log(JSON.stringify([s, Date.now()]));\n";
   const dir = await tmpProject({ ...files, 'package.json': '{"type":"module"}' });
   try {
     const r = await run(dir, ['a', 'b', 'c', 'd']);
@@ -220,7 +220,7 @@ test('independent tasks run concurrently, bounded by capacity', async () => {
     let peak = 0;
     for (const [s] of win) peak = Math.max(peak, win.filter(([s2, e2]) => s2 <= s && s < e2).length);
     assert.equal(peak, 2, 'exactly 2 overlap with capacity 2');
-    assert.ok(r.durationMs < 1150, `4x300ms at width 2 should take ~600ms, took ${r.durationMs}`);
+    // Overlap (peak) is the deterministic proof of bounded parallelism; wall-clock bounds are machine-dependent.
   } finally { await rm(dir); }
 });
 
@@ -238,6 +238,30 @@ test('cancellation stops a running task and reports cancelled', async () => {
     assert.equal(task(r, 'hang').state, 'cancelled');
     assert.ok(r.cancelled && !r.ok);
     assert.ok(Date.now() - t0 < 4000);
+  } finally { await rm(dir); }
+});
+
+test('cancellation kills the whole process tree, not just the direct child', async () => {
+  const files = {
+    'buildrush.json': JSON.stringify({ version: 1, project: { name: 'p' }, tasks: { tree: { command: 'node scripts/parent.js', inputs: ['scripts/**'], cache: false } } }),
+    'scripts/parent.js': [
+      "import { spawn } from 'node:child_process';",
+      "spawn(process.execPath, ['scripts/child.js'], { stdio: 'ignore' });",
+      'setInterval(() => {}, 1000);',
+    ].join('\n'),
+    'scripts/child.js': "import fs from 'node:fs'; setInterval(() => fs.appendFileSync('beat.txt', 'x'), 50);\n",
+  };
+  const dir = await tmpProject({ ...files, 'package.json': '{"type":"module"}' });
+  try {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 2500); // generous: node start-up is slow on some machines
+    await run(dir, ['tree'], { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 600)); // let any in-flight write land
+    const size = async () => (await fs.stat(path.join(dir, 'beat.txt')).catch(() => ({ size: 0 }))).size;
+    const a = await size();
+    assert.ok(a > 0, 'test is vacuous unless the grandchild was actually running');
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(await size(), a, 'grandchild kept running after cancellation');
   } finally { await rm(dir); }
 });
 

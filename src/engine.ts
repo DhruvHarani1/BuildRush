@@ -11,6 +11,7 @@ import { PackageSelection, selectPackages } from './workspaces.js';
 import { canonical, hashFile, hmac256, mapLimit, sha256 } from './util/hash.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
 import { compileGlobs } from './util/glob.js';
+import { baseDigest, computeKeys, storePath, TestCacheReport, TestKey, TestResultStore } from './testcache.js';
 import { assertNoSymlinkInPath, resolveInside, toPosix, UnsafePathError } from './util/paths.js';
 
 export interface TaskReport {
@@ -28,6 +29,8 @@ export interface TaskReport {
   log: string;
   /** Concise, tool-aware failure summary (display only). */
   diagnostics: string[];
+  /** Per-test-file result caching outcome (tasks with testCache: true), else null. */
+  testCache: TestCacheReport | null;
 }
 
 export interface RunReport {
@@ -189,7 +192,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
   };
   const blank = (task: string): TaskReport => ({
     task, state: 'pending', cache: 'n/a', reasons: [], notes: [], fingerprint: null, durationMs: 0,
-    restoredBytes: 0, storedBytes: 0, savedMsEstimate: 0, exitCode: null, log: '', diagnostics: [],
+    restoredBytes: 0, storedBytes: 0, savedMsEstimate: 0, exitCode: null, log: '', diagnostics: [], testCache: null,
   });
 
   const exec = async (name: string, signal: AbortSignal): Promise<'succeeded' | 'cached' | 'failed' | 'skipped'> => {
@@ -219,11 +222,11 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
         finish(rep);
         return 'failed';
       }
-      const args = extraArgs.get(name) ?? [];
+      let args = extraArgs.get(name) ?? [];
       const inputs = resolveInputs(project, t, isOutputOf(name));
       const components = await buildComponents(project, t, args, inputs, exe, fingerprints, secretKey);
       if (t.adapter) components.toolchain[t.adapter] = await toolVersion(root, taskCwd, ADAPTER_PACKAGE[t.adapter]);
-      const fp = sha256(canonical(components));
+      let fp = sha256(canonical(components));
       rep.fingerprint = fp;
       fingerprints.set(name, fp);
       const prev = await readJson<TaskState_>(taskStatePath(project, name));
@@ -265,6 +268,33 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
         stats.misses++;
       }
 
+      // ---- per-test-file result caching (opt-in) -------------------------------------------
+      let plan: TestPlan | null = null;
+      if (cacheOn && t.testCache && t.kind === 'test') {
+        plan = await planTestCache(project, t, taskCwd, components, extraArgs.has(name) ? args : null);
+        if (plan) {
+          rep.testCache = { skipped: plan.skipped, ran: plan.ran, recorded: 0 };
+          if (plan.run.length === 0) {
+            rep.state = 'cached';
+            rep.cache = 'hit';
+            rep.durationMs = 0;
+            rep.savedMsEstimate = plan.savedMs;
+            rep.notes.push(`testCache: all ${plan.skipped.length} test file(s) unchanged since a passing run; nothing executed`);
+            stats.misses--;
+            stats.hits++;
+            stats.savedMs += plan.savedMs;
+            finish(rep);
+            return 'cached';
+          }
+          rep.notes.push(`testCache: skipped ${plan.skipped.length} of ${plan.skipped.length + plan.run.length} test file(s) (unchanged since a passing run); running ${plan.run.length}`);
+          args = plan.run.map((r) => toPosix(path.relative(taskCwd, path.join(root, r))));
+          components.args = args;
+          fp = sha256(canonical(components));
+          rep.fingerprint = fp;
+          fingerprints.set(name, fp);
+        } else rep.notes.push('testCache: no cacheable test files found for this task; running normally');
+      }
+
       // ---- execute -------------------------------------------------------------------------
       const redact = makeRedactor(env);
       const res = await runCommand({
@@ -298,6 +328,9 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
       dirty = true;
       rep.state = 'succeeded';
       history[name] = res.durationMs;
+      if (plan) {
+        rep.testCache!.recorded = await recordPasses(project, plan, lockedScan, rep.notes, res.durationMs);
+      }
       const cacheable = cacheOn;
       let manifest: ManifestEntry[] | null = null;
       if (t.outputs.length) {
@@ -390,6 +423,69 @@ export function buildEnv(t: TaskConfig, parent: NodeJS.ProcessEnv): Record<strin
   for (const k of [...t.env, ...t.passEnv]) if (parent[k] !== undefined) env[k] = parent[k]!;
   for (const k of Object.keys(env)) if (k.startsWith('BUILDRUSH_')) delete env[k]; // never leak internals
   return env;
+}
+
+interface TestPlan {
+  keys: Map<string, TestKey>;
+  base: Parameters<typeof baseDigest>[0];
+  store: TestResultStore;
+  skipped: { test: string; reason: string }[];
+  ran: { test: string; reason: string }[];
+  run: string[];
+  savedMs: number;
+}
+
+/** Decide which test files can be skipped. Returns null when the task has no usable test files. */
+async function planTestCache(project: Project, t: TaskConfig, taskCwd: string, components: Components, selectedArgs: string[] | null): Promise<TestPlan | null> {
+  const { root } = project;
+  const graph = await project.graph({ fresh: true });
+  const cwdRel = toPosix(path.relative(root, taskCwd));
+  const inCwd = (p: string) => cwdRel === '' || p.startsWith(cwdRel + '/');
+  let candidates: string[];
+  if (selectedArgs) {
+    candidates = selectedArgs.map((a) => toPosix(path.relative(root, path.resolve(taskCwd, a))));
+    if (candidates.some((c) => !inCwd(c))) return null; // cannot address tests outside cwd by relative argument safely
+  } else candidates = graph.testFiles().filter(inCwd);
+  if (candidates.length === 0) return null;
+  const base = { task: t.name, command: components.command, cwd: components.cwd, env: components.env, toolchain: components.toolchain };
+  const keys = computeKeys(graph, project.index.files, candidates, baseDigest(base, project.index.files));
+  const store = new TestResultStore(storePath(project.stateDir, t.name));
+  await store.load();
+  const plan: TestPlan = { keys, base, store, skipped: [], ran: [], run: [], savedMs: 0 };
+  for (const c of candidates) {
+    const k = keys.get(c)!;
+    const hit = k.key ? store.has(k.key) : null;
+    if (hit) {
+      plan.skipped.push({ test: c, reason: `unchanged since passing run at ${new Date(hit.at).toISOString()} (file, imports, config, env and toolchain identical)` });
+      plan.savedMs += hit.durationMs;
+    } else {
+      plan.run.push(c);
+      plan.ran.push({ test: c, reason: k.key === null ? `always runs: ${k.reason}` : store.knowsTest(c) ? 'file, an import, config, env or toolchain changed since last passing run' : 'no recorded passing run' });
+    }
+  }
+  return plan;
+}
+
+/** Record passes only for files whose inputs are provably unchanged since the run started. */
+async function recordPasses(project: Project, plan: TestPlan, rescan: () => Promise<unknown>, notes: string[], durationMs: number): Promise<number> {
+  await rescan();
+  const graph = await project.graph({ fresh: true });
+  const after = computeKeys(graph, project.index.files, plan.run, baseDigest(plan.base, project.index.files));
+  const per = Math.round(durationMs / Math.max(1, plan.run.length));
+  const moved: string[] = [];
+  let n = 0;
+  for (const test of plan.run) {
+    const before = plan.keys.get(test)!.key;
+    if (!before) continue;
+    if (after.get(test)?.key !== before) moved.push(test);
+    else {
+      plan.store.add(before, { test, at: Date.now(), durationMs: per });
+      n++;
+    }
+  }
+  if (moved.length) notes.push(`testCache: inputs changed during execution for ${moved.slice(0, 3).join(', ')}${moved.length > 3 ? ', ...' : ''}; those results not recorded`);
+  await plan.store.save();
+  return n;
 }
 
 function resolveInputs(project: Project, t: TaskConfig, isExcludedOutput: (rel: string) => boolean): string[] {

@@ -21,13 +21,16 @@ const RUNS = Number(args.get('runs') ?? 5);
 const WANT = (args.get('scenarios') ?? 'all').split(',');
 if (!PRESETS[WORKLOAD]) throw new Error(`unknown workload ${WORKLOAD}; choose ${Object.keys(PRESETS).join(', ')}`);
 const dir = path.join(HERE, '.work', WORKLOAD);
-const bin = (n) => path.join(dir, 'node_modules/.bin', n);
+const WIN = process.platform === 'win32';
+// On Windows, npm and node_modules/.bin entries are .cmd shims, which spawn() can only run through a shell (all args here are fixed literals).
+const bin = (n) => path.join(dir, 'node_modules/.bin', WIN ? n + '.cmd' : n);
 
-const ENV = { PATH: process.env.PATH, HOME: process.env.HOME, NO_COLOR: '1', CI: '1' };
+// Windows tools need SystemRoot, TEMP, etc.; keep the whole environment there.
+const ENV = WIN ? { ...process.env, NO_COLOR: '1', CI: '1' } : { PATH: process.env.PATH, HOME: process.env.HOME, NO_COLOR: '1', CI: '1' };
 function run(cmd, argv, { allowFail = false, env = ENV } = {}) {
   return new Promise((resolve, reject) => {
     const t0 = process.hrtime.bigint();
-    const c = spawn(cmd, argv, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const c = spawn(cmd, argv, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'], shell: WIN && cmd !== 'node', windowsHide: true });
     let out = '', err = '';
     c.stdout.on('data', (d) => (out += d));
     c.stderr.on('data', (d) => (err += d));
@@ -73,7 +76,7 @@ console.error(`# workload=${WORKLOAD} runs=${RUNS}`);
 fs.rmSync(dir, { recursive: true, force: true });
 const { narrowModule, wideModule } = generate(dir, PRESETS[WORKLOAD]);
 console.error('# installing tools (npm install)...');
-await run('npm', ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--loglevel=error'], { env: process.env });
+await run(WIN ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--loglevel=error'], { env: process.env });
 git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'bench');
 const versions = Object.fromEntries(['typescript', 'vite', 'vitest'].map((p) => [p, JSON.parse(fs.readFileSync(path.join(dir, 'node_modules', p, 'package.json'), 'utf8')).version]));
 const machine = { cpu: os.cpus()[0]?.model, cores: os.cpus().length, memGiB: +(os.totalmem() / 2 ** 30).toFixed(1), os: `${os.type()} ${os.release()}`, node: process.version, tools: versions, buildrush: JSON.parse(fs.readFileSync(path.resolve(HERE, '../package.json'), 'utf8')).version, gitSha: (() => { try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: HERE }).toString().trim(); } catch { return null; } })() };

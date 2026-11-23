@@ -26,7 +26,8 @@ Unknown keys are errors, not silently ignored. Run `buildrush config validate`.
       "cwd": ".",                       // project-relative
       "cpu": 1,                         // scheduler weight
       "timeoutMs": 600000,
-      "affected": false                 // test tasks: receive selected test files under --affected (default true for kind "test")
+      "affected": false,                // test tasks: receive selected test files under --affected (default true for kind "test")
+      "testCache": false                // test tasks only, opt-in: skip individual test files unchanged since a passing run (see below)
     }
   },
   "pipelines": { "default": ["typecheck", "build"] },
@@ -140,3 +141,30 @@ has non-literal dynamic loading, `import.meta.glob`, `require.context` or an
 unresolved alias, or when git cannot be queried. Tests with unresolved imports
 always run. Deleted files are expanded using the previous graph. Imports inside
 comments/strings can add edges (extra work, never skipped work).
+
+## Per-test-file result caching (`testCache`)
+
+Opt-in (`"testCache": true`, default `false`, only valid for `kind: "test"`). Without it
+the whole test task is one cache unit, so a one-file edit re-runs every test. With it,
+when the task misses the whole-task cache, each test file (from `tests.patterns`,
+inside the task `cwd`; under `--affected`, the selected files) is looked up on its own.
+A file is **skipped** only if a prior **passing** run recorded the identical key:
+
+- the test file's content digest and the digests of its whole transitive import closure (module graph);
+- every global config file (`package.json`, lockfiles, `tsconfig*.json`, vite/vitest/jest configs, `.env*`, `.npmrc`, `.nvmrc`, `buildrush.json`): any change invalidates all tests;
+- the task command, cwd, declared `env` (secret-named values are HMAC'd; no env values are stored) and toolchain (node, adapter version, executable digest).
+
+Rules that keep it safe:
+
+- A test whose closure contains any **uncertain** import (non-literal `import()`/`require()`, `import.meta.glob`, `require.context`, any unresolved import, including generated files that are task outputs) **always runs**.
+- Only runs that exit 0 record results. Failed, timed-out and cancelled runs record nothing, even for files that passed inside them.
+- After a passing run the files are re-scanned; a result is recorded only if that file's key is unchanged since the run started.
+- `--no-cache` and `"cache": false` disable it. With the `vitest` adapter it is disabled automatically when the vitest config customises `root/include/setupFiles/globalSetup/dir` or the command uses `--config/--root/--dir/--workspace/--project`.
+- Skips are reported per file with a reason (`[cached]`/`skip <file>: unchanged since passing run ...` in the CLI; `testCache.skipped` / `testCache.ran` in `--json`). If every file is skipped nothing is executed.
+
+Requirements and limits (be honest with yourself before enabling):
+
+- The test command must accept test file paths as trailing arguments (as `vitest run <files>` and `node --test <files>` do) and must fail if a given file does not run. With `testCache`, BuildRush always passes the explicit list of files to run, so discovery is defined by `tests.patterns`, not by the runner's own include rules.
+- Dependencies the graph cannot see are not tracked: files read at runtime (`fs.readFile`, fixtures, snapshots), network, time, randomness, and setup files/globals that are not imported by the test. Keep those tests out of `testCache` tasks or list them via a separate task with `"cache": false`.
+- Results are stored under `.buildrush/state/testcache/` (not in the content-addressed cache); up to 4 keys are kept per test file.
+- Verified by tests against plain node-script runners; it has not been benchmarked with a real vitest install.

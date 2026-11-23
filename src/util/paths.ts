@@ -25,7 +25,9 @@ export function safeRelative(rel: string): string {
     throw new UnsafePathError(`absolute path not allowed: ${JSON.stringify(rel)}`);
   }
   const n = path.posix.normalize(rel);
-  if (n === '.' || n === '..' || n.startsWith('../')) {
+  // `./` (e.g. from "a/../") is the root itself. A drive-like segment ("c:", "a/C:..") is drive-relative on
+  // Windows (path.resolve would jump to that drive's cwd), so it is rejected at any depth, not just at the start.
+  if (n === '.' || n === './' || n === '..' || n.startsWith('../') || /(^|\/)[a-zA-Z]:/.test(n)) {
     throw new UnsafePathError(`path escapes project root: ${JSON.stringify(rel)}`);
   }
   return n;

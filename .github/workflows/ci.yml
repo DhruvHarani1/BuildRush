@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: ['22', '24']
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -25,7 +25,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - name: Dogfood (BuildRush builds and tests itself, twice: second run must be fully cached)
+      - name: "Dogfood (BuildRush builds and tests itself twice; second run must be fully cached)"
         shell: bash
         run: |
           node bin/buildrush.js run
@@ -43,4 +43,4 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm audit signatures
       - name: Package contents are exactly what we intend to ship
-        run: npm run build && npm pack --dry-run --json | node -e "const p=JSON.parse(require('fs').readFileSync(0,'utf8'))[0]; const bad=p.files.filter(f=>/(^|\/)(test|\.github|\.env)/.test(f.path)); if(bad.length){console.error(bad);process.exit(1)}"
+        run: npm run build && npm pack --dry-run --json | node -e "const p=JSON.parse(require('fs').readFileSync(0,'utf8'))[0]; const bad=p.files.filter(f=>/(^|\/)(test\/|\.github\/|\.env)/.test(f.path)); if(bad.length){console.error(bad);process.exit(1)}"

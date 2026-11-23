@@ -41,6 +41,8 @@ export interface TaskConfig {
   timeoutMs: number | null;
   /** For test tasks: append selected test files to argv under --affected. */
   affected: boolean;
+  /** Test tasks only (opt-in, default false): skip individual test files whose result is provably unchanged since a passing run. */
+  testCache: boolean;
   adapter: AdapterName | null;
   /** Env var name prefixes whose present variables are passed AND fingerprinted (set by adapters). */
   envPrefixes: string[];
@@ -114,7 +116,7 @@ export function splitCommand(cmd: string): string[] {
 }
 
 const TASK_KEYS = new Set([
-  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'scope', 'packages',
+  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'scope', 'packages', 'testCache',
 ]);
 const TOP_KEYS = new Set(['$schema', 'version', 'project', 'tasks', 'pipelines', 'ignore', 'concurrency', 'cache', 'tests', 'workspaces']);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -229,6 +231,8 @@ export function validateConfig(raw: unknown): Config {
       if (scope === 'packages' && t.cwd !== undefined) {
         issues.push(`${w}.cwd: not allowed with scope "packages" (every instance runs in its own package directory)`);
       }
+      if (t.testCache !== undefined && typeof t.testCache !== 'boolean') issues.push(`${w}.testCache: must be boolean`);
+      if (t.testCache === true && kind !== 'test') issues.push(`${w}.testCache: only valid for tasks of kind "test"`);
       tasks[name] = {
         name,
         command,
@@ -243,6 +247,7 @@ export function validateConfig(raw: unknown): Config {
         cpu: typeof cpu === 'number' ? cpu : 1,
         timeoutMs: timeoutMs as number | null,
         affected: t.affected === undefined ? kind === 'test' : (t.affected as boolean),
+        testCache: t.testCache === true,
         adapter,
         envPrefixes: [],
         notes: [],
