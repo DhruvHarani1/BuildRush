@@ -239,8 +239,11 @@ test('watch: an edit during a run cancels it; the partial run is never cached or
   try {
     await waitFor(() => exists(path.join(dir, '.buildrush/started-hang')), 'slow task to start');
     await h.write('src/go.txt', 'fast');
-    await waitFor(() => h.cycles.length >= 2, 'restarted cycle');
-    const [c1, c2] = h.cycles as [WatchCycle, WatchCycle];
+    // fs.writeFile is truncate-then-write, so one edit can legitimately produce two change events and
+    // supersede the restarted run once more (seen on Windows CI). Wait for the first cycle that completed.
+    await waitFor(() => h.cycles.slice(1).some((c) => !c.superseded), 'restarted cycle that completes');
+    const c1 = h.cycles[0]!;
+    const c2 = h.cycles.slice(1).find((c) => !c.superseded)!;
     assert.equal(c1.superseded, true);
     assert.equal(c1.report!.cancelled, true);
     assert.equal(c1.report!.tasks[0]!.state, 'cancelled');
