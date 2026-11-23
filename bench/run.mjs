@@ -130,6 +130,69 @@ if (want('restore')) { reset(); await brRun({}); const inner = []; record('cache
   'buildrush (restore step only)': stats(inner),
 }); }
 if (want('graph')) record('graph construction (buildrush analyze)', { buildrush: await sample(async () => (await br('analyze', '--json')).ms) });
+
+// ---- opt-in per-test-file result caching (testCache: true on the test task) ---------------------
+// These scenarios run last: they commit a testCache variant of buildrush.json, then restore the original.
+const TC_KEYS = ['testcache-narrow', 'testcache-wide', 'testcache-nochange'];
+if (TC_KEYS.some(want)) {
+  const cfgPath = path.join(dir, 'buildrush.json');
+  const origCfg = fs.readFileSync(cfgPath, 'utf8');
+  const cfg = JSON.parse(origCfg); cfg.tasks.test.testCache = true;
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  git('commit', '-qam', 'enable testCache');
+  const testFiles = fs.readdirSync(path.join(dir, 'tests')).filter((n) => n.endsWith('.test.ts'));
+  // Generated test k imports exactly one module m<i>; m<i> transitively imports every lower module (i-1, i-7 chain),
+  // so an edit to m<j> can affect exactly the tests whose module index is >= j.
+  const testModuleIdx = testFiles.map((n) => Number(/lib\/m(\d+)'/.exec(fs.readFileSync(path.join(dir, 'tests', n), 'utf8'))[1]));
+  const modIdx = (file) => Number(/m(\d+)\.ts$/.exec(file)[1]);
+  const expectedAffected = (file) => testModuleIdx.filter((i) => i >= modIdx(file)).length;
+  const total = testFiles.length;
+  // Run the full pipeline and assert testCache is active and ran/skipped are exactly as expected.
+  const tcRun = async (expectRan) => {
+    const { ms, rep } = await brRun({ typecheck: 'succeeded', build: 'succeeded', test: 'succeeded' });
+    const tc = rep.tasks.find((x) => x.task === 'test').testCache;
+    if (!tc) throw new Error('testCache is NOT active for the test task (auto-disabled or not configured); scenario would measure the wrong thing');
+    if (tc.ran.length !== expectRan || tc.skipped.length !== total - expectRan) throw new Error(`UNEXPECTED testCache outcome: ran ${tc.ran.length} / skipped ${tc.skipped.length}, expected ran ${expectRan} / skipped ${total - expectRan} of ${total}`);
+    return { ms, ran: tc.ran.length, skipped: tc.skipped.length };
+  };
+  // Activation check: the first run records every file; the second, after a content edit, must skip the unaffected ones.
+  reset(); await brRun({});
+  const probeRep = (await brRun({})).rep.tasks.find((x) => x.task === 'test');
+  if (probeRep.state !== 'cached') throw new Error(`testCache setup: expected a whole-task cache hit, got ${probeRep.state}`);
+  bump(narrowModule); await tcRun(expectedAffected(narrowModule)); revert();
+  results.checks.testCacheActive = true;
+  // Correctness gate: a failing test must fail identically to native and must never be recorded as a pass.
+  fs.appendFileSync(path.join(dir, narrowModule), "\nthrow new Error('bench: intentional failure');\n");
+  const nativeFail = await run(bin('vitest'), ['run'], { allowFail: true });
+  const brFail = async () => JSON.parse((await run('node', [BR, 'run', '--json'], { allowFail: true })).out);
+  const f1 = await brFail(); const f2 = await brFail();
+  const brFailed = (rep) => rep.ok === false && rep.tasks.find((x) => x.task === 'test').state === 'failed';
+  results.checks.testCacheFailureMatchesNative = nativeFail.code !== 0 && brFailed(f1) && brFailed(f2);
+  if (!results.checks.testCacheFailureMatchesNative) throw new Error('CORRECTNESS FAILURE: a failing test did not fail identically (native exit ' + nativeFail.code + ') or a failure was served from the testCache');
+  revert();
+  console.error('# check ok: testCache active; a failing test fails like native twice in a row (failures are never cached)');
+
+  const prepare = async () => { reset(); await brRun({}); await brRun({}); }; // warm: every test file has a recorded pass
+  const info = {};
+  if (want('testcache-narrow')) { await prepare(); const name = `tests: one-file edit, narrow impact (${narrowModule}), testCache ON, full pipeline`; const exp = expectedAffected(narrowModule); record(name, {
+    'native parallel': await sample(nativePar, { before: () => bump(narrowModule), after: revert }),
+    'native vitest run (all tests)': await sample(async () => (await run(bin('vitest'), ['run'])).ms, { before: () => bump(narrowModule), after: revert }),
+    'native vitest related': await sample(async () => (await run(bin('vitest'), ['related', narrowModule, '--run'])).ms, { before: () => bump(narrowModule), after: revert }),
+    'buildrush run (testCache ON)': await sample(async () => { const r = await tcRun(exp); info.n = r; return r.ms; }, { before: () => bump(narrowModule), after: revert }),
+  }); results.scenarios[name]['_buildrush test files ran / skipped'] = `${info.n.ran} / ${info.n.skipped} of ${total}`; }
+  if (want('testcache-wide')) { await prepare(); const name = `tests: one-file edit, wide impact (${wideModule}), testCache ON, full pipeline`; const exp = expectedAffected(wideModule); record(name, {
+    'native parallel': await sample(nativePar, { before: () => bump(wideModule), after: revert }),
+    'native vitest run (all tests)': await sample(async () => (await run(bin('vitest'), ['run'])).ms, { before: () => bump(wideModule), after: revert }),
+    'native vitest related': await sample(async () => (await run(bin('vitest'), ['related', wideModule, '--run'])).ms, { before: () => bump(wideModule), after: revert }),
+    'buildrush run (testCache ON)': await sample(async () => { const r = await tcRun(exp); info.w = r; return r.ms; }, { before: () => bump(wideModule), after: revert }),
+  }); results.scenarios[name]['_buildrush test files ran / skipped'] = `${info.w.ran} / ${info.w.skipped} of ${total}`; }
+  if (want('testcache-nochange')) { await prepare(); record('no-change run, testCache ON', {
+    'native parallel': await sample(nativePar),
+    buildrush: await sample(async () => (await brRun({ typecheck: 'cached', build: 'cached', test: 'cached' })).ms),
+  }); }
+
+  fs.writeFileSync(cfgPath, origCfg); git('commit', '-qam', 'restore config');
+}
 results.cacheDiskBytes = dirSize(path.join(dir, '.buildrush', 'cache'));
 results.memory = 'not measured';
 
