@@ -12,14 +12,14 @@ shipped unless tests exercise it.
 | M5 Vitest adapter | 🟡 | adapter + `--affected` selection shipped and benchmarked; missing: coverage-informed and risk-based modes, per-file result caching, sharding, flaky-test policy, duration history |
 | M6 Watch mode + daemon | ⬜ | needs watcher w/ overflow recovery, debounce, authenticated local IPC |
 | M7 Hardening & release | 🟡 | security docs, CI, CodeQL, Scorecard, provenance release written; macOS/Windows test matrix, fuzzing of the import scanner, npm/Docker publication still to do |
-| Workspaces | ⬜ | per-package task expansion (`build` in every package, ordered by package deps) |
+| Workspaces | 🟡 | npm/yarn/bun/pnpm detection, per-package task expansion with `^` ordering, package-aware module graph and `--affected` implemented and tested on a script-based fixture. Not done: validation against real-world monorepos, `--filter`, package-manager-aware task defaults, partial restore of a package's outputs, benchmarks |
 | Property-based + fuzz tests | ⬜ | cache keys, glob matcher, path validation |
 | Remote cache | ⬜ | opt-in only. Prereqs: signed manifests, tenant isolation, TLS auth, retention policy (ADR first) |
 | More ecosystems | ⬜ | Python, Go, Rust adapters only after JS/TS is solid |
 
 ## Near-term performance ideas (measure first)
 
-1. Per-package task splitting for workspaces (biggest real-world win).
+1. Per-package task splitting for workspaces is implemented (see Workspaces row); measure it on real monorepos before claiming a win.
 2. Parallel/streaming blob restore and hardlink/reflink restore where safe.
 3. Persisting the module graph incrementally instead of rebuilding it.
 4. Tool-native incremental modes (`tsc --incremental`) with their state dirs as declared outputs.

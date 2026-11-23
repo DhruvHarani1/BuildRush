@@ -7,6 +7,7 @@ import { Project } from './project.js';
 import { isSecretName, makeRedactor, resolveExecutable, runCommand } from './runner.js';
 import { detectCycle, schedule, TaskState } from './scheduler.js';
 import { changedFilesFromGit, selectTests, Selection } from './affected.js';
+import { PackageSelection, selectPackages } from './workspaces.js';
 import { canonical, hashFile, hmac256, mapLimit, sha256 } from './util/hash.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
 import { compileGlobs } from './util/glob.js';
@@ -35,6 +36,8 @@ export interface RunReport {
   durationMs: number;
   tasks: TaskReport[];
   selection: Selection | null;
+  /** Workspace projects under --affected: which packages' tasks were selected. */
+  packages?: PackageSelection | null;
 }
 
 export interface RunOptions {
@@ -74,11 +77,17 @@ export function closure(project: Project, names: string[]): string[] {
 }
 
 /** Expand a task name that may also be a pipeline name. */
-export function expandNames(project: Project, names: string[]): string[] {
+export function expandNames(project: Project, names: string[], keep?: (instanceId: string) => boolean): string[] {
   const out: string[] = [];
-  for (const n of names) {
-    if (project.config.pipelines[n] && !project.config.tasks[n]) out.push(...project.config.pipelines[n]!);
+  const push = (n: string) => {
+    // A per-package task name stands for all its instances (optionally filtered, e.g. by --affected).
+    const group = project.taskGroups[n];
+    if (group) out.push(...(keep ? group.filter(keep) : group));
     else out.push(n);
+  };
+  for (const n of names) {
+    if (!project.taskGroups[n] && project.config.pipelines[n] && !project.config.tasks[n]) project.config.pipelines[n]!.forEach(push);
+    else push(n);
   }
   return out;
 }
@@ -86,7 +95,25 @@ export function expandNames(project: Project, names: string[]): string[] {
 export async function runTasks(project: Project, requested: string[], opts: RunOptions = {}): Promise<RunReport> {
   const started = Date.now();
   const { config, root, cache } = project;
-  const order = closure(project, expandNames(project, requested));
+  // Workspaces + --affected: only packages whose files (or dependencies) changed get their tasks
+  // scheduled; the tasks they depend on are pulled in by closure() and normally come from the cache.
+  let packageSelection: PackageSelection | null = null;
+  let changedEarly: Awaited<ReturnType<typeof changedFilesFromGit>> | null = null;
+  if (opts.affected && project.workspace && Object.keys(project.taskGroups).length) {
+    changedEarly = await changedFilesFromGit(root, opts.affected.since);
+    packageSelection = changedEarly.ok
+      ? selectPackages(project.workspace, await project.graph(), await project.loadPreviousGraph(), changedEarly.files)
+      : (() => {
+          const names = project.workspace!.packages.map((x) => x.name);
+          const reason = `${changedEarly!.error}; cannot compute changes, selecting every package`;
+          return { mode: 'all' as const, reason, affected: names, skipped: [], why: Object.fromEntries(names.map((n) => [n, reason])) };
+        })();
+  }
+  const inAffected = packageSelection ? new Set(packageSelection.affected) : null;
+  const order = closure(
+    project,
+    expandNames(project, requested, inAffected ? (id) => inAffected.has(config.tasks[id]?.package?.name ?? '') : undefined),
+  );
   const cycle = detectCycle(order.map((id) => ({ id, deps: config.tasks[id]!.dependsOn })));
   if (cycle) throw new Error(`task dependency cycle: ${cycle.join(' -> ')}`);
 
@@ -118,17 +145,20 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
     if (testTasks.length) {
       const graph = await project.graph();
       const prev = await project.loadPreviousGraph();
-      const ch = await changedFilesFromGit(root, opts.affected.since);
+      const ch = changedEarly ?? (await changedFilesFromGit(root, opts.affected.since));
       selection = ch.ok
         ? selectTests(graph, prev, ch.files)
         : { mode: 'all', reason: `${ch.error}; cannot compute changes, running every test`, changed: [], selected: graph.testFiles(), skipped: [], chains: {} };
       await project.saveGraph(graph);
       for (const n of testTasks) {
         if (selection.mode === 'all') continue; // run the task's own full command
-        if (selection.selected.length === 0) skipReason.set(n, 'no tests are affected by the changes');
+        // A per-package test task only receives the selected tests that live in its package.
+        const pkgDir = config.tasks[n]!.package?.dir;
+        const mine = pkgDir ? selection.selected.filter((t) => t.startsWith(pkgDir + '/')) : selection.selected;
+        if (mine.length === 0) skipReason.set(n, 'no tests are affected by the changes');
         else {
           const cwd = path.join(root, config.tasks[n]!.cwd);
-          extraArgs.set(n, selection.selected.map((t) => toPosix(path.relative(cwd, path.join(root, t)))));
+          extraArgs.set(n, mine.map((t) => toPosix(path.relative(cwd, path.join(root, t)))));
         }
       }
     }
@@ -341,6 +371,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
     durationMs: Date.now() - started,
     tasks,
     selection,
+    packages: packageSelection,
   };
 }
 

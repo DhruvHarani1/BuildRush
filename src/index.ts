@@ -7,3 +7,5 @@ export { selectTests } from './affected.js';
 export { schedule, detectCycle } from './scheduler.js';
 export { validateConfig, splitCommand, loadConfig, ConfigError } from './config.js';
 export type { Config, TaskConfig } from './config.js';
+export { discoverWorkspaces, parsePnpmWorkspaceYaml, selectPackages, Workspace } from './workspaces.js';
+export type { WorkspacePackage, PackageSelection } from './workspaces.js';
