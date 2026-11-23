@@ -67,7 +67,7 @@ selection per package.
 ## Design decisions
 
 * **TypeScript on Node, zero runtime deps.** Smallest audit surface, runs where the target ecosystem already is, and avoids a second toolchain for contributors. A Rust/Go core remains possible behind the same on-disk formats if profiling shows Node is the bottleneck; we will not guess before measuring.
-* **No daemon yet.** A daemon adds an IPC attack surface and crash/stale-state handling; the persisted file index already makes warm runs cheap (~0.2 s for BuildRush's own pipeline). `--watch` keeps state in the foreground process instead. A daemon (so separate invocations share warm state) remains to do, with peer-credential-checked Unix sockets / named pipes.
+* **The daemon is optional and opt-in.** One-shot is the default and the fallback for every daemon failure. A daemon adds an IPC attack surface and crash/stale-state handling, and the persisted file index already makes warm runs cheap (~0.2 s for BuildRush's own pipeline), so `--daemon` / `BUILDRUSH_DAEMON=1` enables it per invocation. One daemon per project root listens on a Unix socket / named pipe (never TCP), authenticates every connection with a random token, and serves a closed set of operations (`ping`, `status`, `run`, `analyze`, `cacheStats`, `stop`) through the *same* `runTasks`/`analyze` code as the CLI. It keeps the `FileIndex`, dependency graph and memos warm but **re-scans the index on every request** (digests, not events, decide what changed) and re-resolves config, so it cannot serve stale results; runs are queued per project. Measured saving is small for a no-change `run` (~3-5 %) and larger for graph work (`analyze`, ~35-125 ms): see [daemon.md](daemon.md). `--watch` still keeps its state in the foreground process.
 * **Whole-task cache granularity** (see cache-correctness.md).
 * **JSON config**, to avoid a YAML dependency and ambiguity.
 
@@ -77,7 +77,7 @@ selection per package.
 | --- | --- | --- |
 | Bazel / Buck2 | content-addressed action cache, explicit inputs/outputs, hermeticity mindset, remote-cache-ready key design | no sandboxing; adopts existing tools as-is |
 | Nx / Turborepo | task graph + input hashing, affected computation, cache restore + log replay | graph is import-level, not just package-level; explains every decision |
-| Gradle build cache | up-to-date checks, output capture/restore, "why did it run" | no daemon yet |
+| Gradle build cache | up-to-date checks, output capture/restore, "why did it run" | optional daemon (opt-in), much smaller than Gradle's |
 | ccache / sccache | CAS storage, LRU eviction, integrity verification | task-level not compiler-level |
 | Vitest `--related`, Jest `--findRelatedTests` | reverse-import test selection | conservative fallbacks are explicit and reported |
 

@@ -9,6 +9,8 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ### Added
 - Package tasks: `rootInputs` (project-relative files outside the package that every instance hashes).
+- Optional local daemon: `buildrush daemon start|stop|status` and `--daemon` / `BUILDRUSH_DAEMON=1` (off by default) for `run/build/test/check`, `analyze --json` and `cache stats`. Unix socket / named pipe only, per-daemon token (0600 file in a 0700 per-user dir), closed op set, same engine path, serialised runs, stale-state recovery, idle exit, version handshake, one-shot fallback on any error. Design and threat model: docs/daemon.md; benchmark: `bench/daemon.mjs`.
+- `RunOptions.env` and `Project.open({ env, warm })` (library API) so a long-lived host can run with the caller's environment and reuse a re-validated index/graph.
 - Workspaces: detection of npm/yarn/bun (`package.json` `workspaces`) and pnpm (`pnpm-workspace.yaml`) layouts, package discovery, per-package task expansion (`"scope": "packages"`, `"packages"` name filter, `^task` dependencies ordered by the package graph, package dependency cycle errors), package-aware module graph (imports of workspace packages resolve via `exports`/`main` onto sources), package-scoped `--affected` (changed packages plus transitive dependents), `graph --packages`, and workspace info in `analyze`/`explain`. See docs/configuration.md.
 - CLI: `init`, `analyze`, `graph`, `run`, `build`, `test`, `check`, `explain`, `cache stats|verify|clean`, `doctor`, `config validate`.
 - Strict `buildrush.json` schema with path-qualified validation errors; commands run without a shell.
@@ -27,7 +29,8 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - Watch mode: `run|build|test|check --watch` keeps the Project, index and graph in memory, re-runs only affected work on each change (unchanged tasks are `[cached]`), cancels obsolete in-flight runs, reconciles by content digest on a timer and after watcher errors, and with `--json` prints one object per cycle. See docs/architecture.md.
 
 ### Fixed
+- A long-lived process could reuse a stale executable digest after the binary was replaced: the digest memo is now keyed by file identity.
 - A task's inputs could include another, unrelated task's outputs (found by the benchmark suite).
 
 ### Not yet implemented
-Daemon (watch mode itself is shipped), Vite/Vitest-specific adapters, coverage-informed selection, remote cache, Windows support. See ROADMAP.md.
+Daemon peer-credential checks and daemon-hosted watch (watch mode and an opt-in daemon are shipped), Vite/Vitest-specific adapters, coverage-informed selection, remote cache, Windows support. See ROADMAP.md.

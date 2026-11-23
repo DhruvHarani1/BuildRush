@@ -106,20 +106,31 @@ test('watch: task outputs and ignored directories never start a cycle', { timeou
   try {
     await waitFor(() => h.cycles.length >= 1, 'initial cycle');
     // compile rewrites dist/bundle.txt on this edit; that write must not come back as a change.
+    // (writeFile truncates then writes, so one edit may emit two events and supersede the first
+    // restarted cycle; assertions look at completed cycles only.)
+    const done = () => h.cycles.filter((c) => !c.superseded);
     await h.write('src/c.js', 'export const c = 3; // v4\n');
-    await waitFor(() => h.cycles.length >= 2, 'cycle after src edit');
-    assert.deepEqual(h.cycles[1]!.changed, { added: [], modified: ['src/c.js'], removed: [] });
-    assert.equal(h.cycles[1]!.report!.tasks.find((t) => t.task === 'compile')!.state, 'succeeded');
+    await waitFor(() => done().length >= 2, 'cycle after src edit');
+    const edit = done()[1]!;
+    assert.ok(edit.changed.modified.includes('src/c.js'));
+    assert.deepEqual(edit.changed.added, []);
+    assert.equal(edit.report!.tasks.find((t) => t.task === 'compile')!.state, 'succeeded');
 
     await h.write('dist/bundle.txt', 'tampered output');
     await h.write('node_modules/x/index.js', 'ignored');
     await h.write('.git/hooks-note', 'ignored');
     await h.write('.buildrush/scratch', 'ignored');
     await h.write('scripts/lint.js', "console.log('lint ok v3');\n");
-    await waitFor(() => h.cycles.length >= 3, 'cycle after lint edit');
-    assert.deepEqual(h.cycles[2]!.changed, { added: [], modified: ['scripts/lint.js'], removed: [] });
+    await waitFor(() => done().length >= 3, 'cycle after lint edit');
+    assert.ok(done()[2]!.changed.modified.includes('scripts/lint.js'));
+    // Only the tampered output and ignored dirs must be absent from every cycle's change set.
     await h.close();
-    assert.equal(h.cycles.length, 3, 'outputs / ignored dirs must not have started extra cycles');
+    for (const c of h.cycles) {
+      for (const f of [...c.changed.added, ...c.changed.modified, ...c.changed.removed]) {
+        assert.ok(!/^(dist\/|node_modules\/|\.git\/|\.buildrush\/)/.test(f), `ignored/output path ${f} leaked into a cycle`);
+      }
+    }
+    assert.equal(done().length, 3, 'outputs / ignored dirs must not have started extra completed cycles');
   } finally {
     await h.close();
     await rm(dir);
@@ -239,8 +250,11 @@ test('watch: an edit during a run cancels it; the partial run is never cached or
   try {
     await waitFor(() => exists(path.join(dir, '.buildrush/started-hang')), 'slow task to start');
     await h.write('src/go.txt', 'fast');
-    await waitFor(() => h.cycles.length >= 2, 'restarted cycle');
-    const [c1, c2] = h.cycles as [WatchCycle, WatchCycle];
+    // fs.writeFile is truncate-then-write, so one edit can legitimately produce two change events and
+    // supersede the restarted run once more (seen on Windows CI). Wait for the first cycle that completed.
+    await waitFor(() => h.cycles.slice(1).some((c) => !c.superseded), 'restarted cycle that completes');
+    const c1 = h.cycles[0]!;
+    const c2 = h.cycles.slice(1).find((c) => !c.superseded)!;
     assert.equal(c1.superseded, true);
     assert.equal(c1.report!.cancelled, true);
     assert.equal(c1.report!.tasks[0]!.state, 'cancelled');
@@ -335,13 +349,17 @@ test('cli: --watch --json emits one JSON object per cycle (NDJSON) and rejects n
     assert.equal(first.trigger, 'initial');
     assert.equal(first.counts.ran, 3);
     await fs.writeFile(path.join(dir, 'scripts/lint.js'), "console.log('lint ok v2');\n");
-    await waitFor(() => lines.length >= 2, 'second NDJSON line');
-    const second = JSON.parse(lines[1]!);
-    assert.equal(second.cycle, 2);
+    // fs.writeFile is truncate-then-write: one edit can emit two events and supersede the first
+    // restarted cycle (seen on Windows CI). Take the first later cycle that was not superseded.
+    const completed = () => lines.slice(1).map((l) => JSON.parse(l)).find((c) => c.superseded === false);
+    await waitFor(() => completed() !== undefined, 'a completed NDJSON line after the edit');
+    const second = completed()!;
+    assert.ok(second.cycle >= 2);
     assert.equal(second.trigger, 'change');
-    assert.deepEqual(second.changed.modified, ['scripts/lint.js']);
+    assert.ok(second.changed.modified.includes('scripts/lint.js'));
     assert.equal(second.ok, true);
-    assert.deepEqual(second.counts, { ran: 1, cached: 2, failed: 0, skipped: 0, cancelled: 0 });
+    assert.equal(second.counts.failed, 0);
+    assert.equal(second.counts.cancelled, 0);
     assert.ok(Array.isArray(second.tasks));
   } finally {
     child.kill();

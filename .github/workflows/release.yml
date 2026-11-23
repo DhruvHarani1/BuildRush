@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '22', cache: npm }
       - run: npm ci
       - run: npm test
@@ -26,13 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: '22', registry-url: 'https://registry.npmjs.org', cache: npm }
       - run: npm ci
       - run: npm run build
       - run: npm sbom --sbom-format cyclonedx --omit dev > sbom.cdx.json
+      # npm trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 ships an older npm.
+      # No NPM_TOKEN: configure the trusted publisher at npmjs.com (package Settings): DhruvHarani1/BuildRush, release.yml, environment 'release'.
+      - run: npm install -g npm@^11.5.1 && npm --version
       - run: npm publish --provenance --access public
-        env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }   # or remove when npm trusted publishing is configured
       - name: GitHub release with SBOM
         env: { GH_TOKEN: '${{ github.token }}' }
         run: gh release create "${GITHUB_REF_NAME}" sbom.cdx.json --generate-notes --verify-tag

@@ -49,6 +49,8 @@ export interface RunOptions {
   bail?: boolean;
   affected?: { since?: string } | null;
   signal?: AbortSignal;
+  /** Environment tasks inherit from and are fingerprinted against. Defaults to process.env; the daemon passes the CLIENT's. */
+  env?: NodeJS.ProcessEnv;
   onTaskDone?: (r: TaskReport) => void;
 }
 
@@ -97,6 +99,7 @@ export function expandNames(project: Project, names: string[], keep?: (instanceI
 
 export async function runTasks(project: Project, requested: string[], opts: RunOptions = {}): Promise<RunReport> {
   const started = Date.now();
+  const parentEnv = opts.env ?? process.env;
   const { config, root, cache } = project;
   // Workspaces + --affected: only packages whose files (or dependencies) changed get their tasks
   // scheduled; the tasks they depend on are pulled in by closure() and normally come from the cache.
@@ -200,7 +203,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
     // Adapter env prefixes (e.g. VITE_) expand to every matching variable that is actually set.
     const t: TaskConfig = {
       ...declared,
-      env: [...new Set([...declared.env, ...Object.keys(process.env).filter((k) => declared.envPrefixes.some((p) => k.startsWith(p)))])].sort(),
+      env: [...new Set([...declared.env, ...Object.keys(parentEnv).filter((k) => declared.envPrefixes.some((p) => k.startsWith(p)))])].sort(),
     };
     const rep = blank(name);
     const t0 = Date.now();
@@ -213,7 +216,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
       }
       await ensureFresh();
       const taskCwd = t.cwd === '.' ? root : resolveInside(root, t.cwd);
-      const env = buildEnv(t, process.env);
+      const env = buildEnv(t, parentEnv);
       const exe = resolveExecutable(t.command[0]!, taskCwd, root, env.PATH ?? '');
       if (!exe) {
         rep.state = 'failed';
@@ -224,7 +227,7 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
       }
       let args = extraArgs.get(name) ?? [];
       const inputs = resolveInputs(project, t, isOutputOf(name));
-      const components = await buildComponents(project, t, args, inputs, exe, fingerprints, secretKey);
+      const components = await buildComponents(project, t, args, inputs, exe, fingerprints, secretKey, parentEnv);
       if (t.adapter) components.toolchain[t.adapter] = await toolVersion(root, taskCwd, ADAPTER_PACKAGE[t.adapter]);
       let fp = sha256(canonical(components));
       rep.fingerprint = fp;
@@ -503,10 +506,11 @@ async function buildComponents(
   exe: string,
   fingerprints: Map<string, string>,
   secretKey: Buffer,
+  parentEnv: NodeJS.ProcessEnv,
 ): Promise<Components> {
   const env: Record<string, string | null> = {};
   for (const name of [...t.env].sort()) {
-    const v = process.env[name];
+    const v = parentEnv[name];
     env[name] = v === undefined ? null : isSecretName(name) ? 'hmac:' + hmac256(secretKey, `${name}=${v}`) : sha256(`${name}=${v}`);
   }
   const inputDigests: Record<string, string> = {};
@@ -541,11 +545,13 @@ async function executableDigest(exe: string): Promise<string> {
     real = await fs.realpath(exe);
   } catch { /* keep */ }
   if (real === process.execPath) return `node:${process.version}`;
-  const memo = binDigestMemo.get(real);
-  if (memo) return memo;
   const st = await fs.stat(real);
+  // Keyed by file identity too, so a long-lived process (the daemon) notices a replaced binary.
+  const memoKey = `${real}|${st.size}|${st.mtimeMs}|${st.ino}`;
+  const memo = binDigestMemo.get(memoKey);
+  if (memo) return memo;
   const d = st.size > 64 * 1024 * 1024 ? `meta:${st.size}:${Math.floor(st.mtimeMs)}` : await hashFile(real);
-  binDigestMemo.set(real, d);
+  binDigestMemo.set(memoKey, d);
   return d;
 }
 
