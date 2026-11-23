@@ -7,6 +7,7 @@ import { closure, expandNames, loadTaskState, readStats, RunReport, runTasks, Ta
 import { Project } from './project.js';
 import { selectTests } from './affected.js';
 import { runDoctor } from './doctor.js';
+import { startWatch, WatchChanges } from './watch.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
 import { compileGlobs } from './util/glob.js';
 
@@ -30,6 +31,7 @@ Commands:
   config validate          Validate ${CONFIG_FILE}
 
 Options:
+  --watch                  Keep running; re-run affected work on every file change (run/build/test/check)
   --affected               Run only tests affected by changes (test tasks; falls back to all tests when unsure).
                            In a workspace, also only the tasks of affected packages (changed + dependents)
   --since <git-ref>        Baseline for --affected (default HEAD)
@@ -47,7 +49,7 @@ Exit codes: 0 success, 1 task failure, 2 usage/config error, 3 internal error, 1
 
 interface Flags {
   json: boolean; verbose: boolean; quiet: boolean; affected: boolean; noCache: boolean; bail: boolean;
-  force: boolean; repair: boolean; dot: boolean; help: boolean; version: boolean;
+  force: boolean; repair: boolean; dot: boolean; help: boolean; version: boolean; watch: boolean;
   packages: boolean;
   since?: string; concurrency?: number; root?: string;
 }
@@ -55,7 +57,7 @@ interface Flags {
 export function parseArgs(argv: string[]): { positional: string[]; flags: Flags } {
   const flags: Flags = {
     json: false, verbose: false, quiet: false, affected: false, noCache: false, bail: false,
-    force: false, repair: false, dot: false, help: false, version: false,
+    force: false, repair: false, dot: false, help: false, version: false, watch: false,
     packages: false,
   };
   const positional: string[] = [];
@@ -70,6 +72,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
       case '--json': flags.json = true; break;
       case '--verbose': case '-v': flags.verbose = true; break;
       case '--quiet': case '-q': flags.quiet = true; break;
+      case '--watch': case '-w': flags.watch = true; break;
       case '--affected': flags.affected = true; break;
       case '--no-cache': flags.noCache = true; break;
       case '--bail': flags.bail = true; break;
@@ -138,12 +141,13 @@ export async function main(argv: string[]): Promise<number> {
   process.on('SIGTERM', onSig);
 
   try {
+    if (flags.watch && !['run', 'build', 'test', 'check'].includes(cmd)) throw new UsageError('--watch only applies to run, build, test and check');
     switch (cmd) {
       case 'init': return await cmdInit(flags);
       case 'analyze': return await cmdAnalyze(flags);
       case 'graph': return await cmdGraph(flags);
-      case 'run': return await cmdRun(rest.length ? rest : ['default'], flags, ac.signal);
-      case 'build': case 'test': case 'check': return await cmdRun([cmd], flags, ac.signal);
+      case 'run': return await (flags.watch ? cmdWatch : cmdRun)(rest.length ? rest : ['default'], flags, ac.signal);
+      case 'build': case 'test': case 'check': return await (flags.watch ? cmdWatch : cmdRun)([cmd], flags, ac.signal);
       case 'explain': return await cmdExplain(rest[0], flags);
       case 'cache': return await cmdCache(rest[0], flags);
       case 'doctor': return await cmdDoctor(flags);
@@ -458,4 +462,80 @@ async function cmdDoctor(f: Flags): Promise<number> {
     for (const c of checks) console.log(`${{ ok: '[ok]  ', warn: '[warn]', fail: '[FAIL]' }[c.status]} ${c.name}: ${c.detail}`);
   }
   return checks.some((c) => c.status === 'fail') ? EXIT.FAILED : EXIT.OK;
+}
+
+// ---- watch mode ---------------------------------------------------------------------------------
+
+function describeChanges(c: WatchChanges): string {
+  const all = [...c.added.map((x) => `+${x}`), ...c.modified.map((x) => `~${x}`), ...c.removed.map((x) => `-${x}`)];
+  return all.slice(0, 6).join(' ') + (all.length > 6 ? ` ...and ${all.length - 6} more` : '');
+}
+
+async function cmdWatch(names: string[], f: Flags, signal: AbortSignal): Promise<number> {
+  const p = await open(f);
+  for (const n of names) {
+    if (!p.config.tasks[n] && !p.config.pipelines[n]) {
+      throw new Error(`unknown task ${JSON.stringify(n)} (tasks: ${Object.keys(p.config.tasks).join(', ')}; pipelines: ${Object.keys(p.config.pipelines).join(', ') || 'none'})`);
+    }
+  }
+  if (!f.json && !f.quiet) console.log(dim(`BuildRush ${VERSION} · ${p.config.project.name} · watching ${closure(p, expandNames(p, names)).length} task(s) · Ctrl+C to stop`));
+  let writes: Promise<unknown> = Promise.resolve();
+  const session = await startWatch(p, {
+    tasks: names,
+    run: { noCache: f.noCache, bail: f.bail, concurrency: f.concurrency, affected: f.affected ? { since: f.since } : null },
+    signal,
+    onNotice: (m) => console.error(`buildrush: ${m}`),
+    onCycleStart: ({ n, trigger, changed }) => {
+      if (f.json || f.quiet) return;
+      const what = trigger === 'initial' ? 'initial run' : describeChanges(changed);
+      const how = trigger === 'reconcile' ? '  (found by reconciliation scan; the watcher did not report it)' : trigger === 'error' ? '  (found after a watcher error)' : '';
+      console.log(`\n${dim(`--- cycle ${n}: ${what}${how}`)}`);
+    },
+    onTaskDone: (r) => {
+      if (f.json) return;
+      const bad = r.state === 'failed' || r.state === 'cancelled';
+      if (f.quiet && !bad) return;
+      console.log(line(r, f.verbose));
+      for (const d of r.diagnostics.slice(0, 10)) console.log(`    ! ${d}`);
+      if (r.log && (r.state === 'failed' || f.verbose)) console.log(r.log.replace(/\n$/, '').split('\n').map((l) => '    | ' + l).join('\n'));
+    },
+    onCycle: (c) => {
+      const tasks = c.report?.tasks ?? [];
+      const count = (s: string) => tasks.filter((t) => t.state === s).length;
+      if (c.report && !c.superseded) {
+        const r = c.report;
+        writes = writes.then(() =>
+          writeFileAtomic(
+            path.join(p.stateDir, 'last-run.json'),
+            JSON.stringify({ at: Date.now(), requested: names, tasks: r.tasks.map((t) => ({ ...t, log: undefined })), selection: r.selection }),
+          ).catch(() => undefined),
+        );
+      }
+      if (f.json) {
+        console.log(JSON.stringify({
+          cycle: c.n, trigger: c.trigger, at: new Date().toISOString(), changed: c.changed,
+          ok: c.report?.ok ?? false, cancelled: c.report?.cancelled ?? false, superseded: c.superseded,
+          configReloaded: c.configReloaded, error: c.error, scanMs: c.scanMs, durationMs: c.durationMs,
+          counts: { ran: count('succeeded'), cached: count('cached'), failed: count('failed'), skipped: count('skipped'), cancelled: count('cancelled') },
+          selection: c.report?.selection ?? null,
+          tasks: tasks.map((t) => ({ ...t, log: f.verbose ? t.log : undefined })),
+        }));
+        return;
+      }
+      if (c.configReloaded) console.log(dim('configuration reloaded'));
+      if (c.error) { console.log(paint(31, `cycle ${c.n} error: ${c.error}`) + dim('  (waiting for changes)')); return; }
+      if (c.superseded) { console.log(paint(33, `cycle ${c.n} superseded by newer changes after ${fmtMs(c.durationMs)}; results discarded, restarting`)); return; }
+      if (c.report?.cancelled) { console.log(paint(33, `cycle ${c.n} cancelled after ${fmtMs(c.durationMs)}`)); return; }
+      if (!f.quiet || !c.report?.ok) {
+        console.log(
+          `${c.report?.ok ? 'ok' : paint(31, 'FAILED')} cycle ${c.n}: ${count('succeeded')} ran, ${count('cached')} cached, ${count('failed')} failed, ${count('skipped')} skipped in ${fmtMs(c.durationMs)}` +
+            dim('  (waiting for changes)'),
+        );
+      }
+    },
+  });
+  await session.done;
+  await writes;
+  if (!f.json) console.log(dim('\nwatch stopped.'));
+  return EXIT.OK;
 }

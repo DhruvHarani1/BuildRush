@@ -254,10 +254,15 @@ test('cancellation kills the whole process tree, not just the direct child', asy
   const dir = await tmpProject({ ...files, 'package.json': '{"type":"module"}' });
   try {
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 2500); // generous: node start-up is slow on some machines
+    const size = async () => (await fs.stat(path.join(dir, 'beat.txt')).catch(() => ({ size: 0 }))).size;
+    // Abort only once the grandchild is demonstrably alive (poll, don't guess: start-up time varies a lot on busy machines).
+    void (async () => {
+      const deadline = Date.now() + 30_000;
+      while ((await size()) === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      ac.abort();
+    })();
     await run(dir, ['tree'], { signal: ac.signal });
     await new Promise((r) => setTimeout(r, 600)); // let any in-flight write land
-    const size = async () => (await fs.stat(path.join(dir, 'beat.txt')).catch(() => ({ size: 0 }))).size;
     const a = await size();
     assert.ok(a > 0, 'test is vacuous unless the grandchild was actually running');
     await new Promise((r) => setTimeout(r, 800));

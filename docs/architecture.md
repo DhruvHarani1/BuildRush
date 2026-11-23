@@ -10,6 +10,8 @@ cli.ts ──► Project (config + FileIndex + Cache + graph)
               ├─ affected.ts   git changes ► test selection (conservative on doubt)
               ├─ cache.ts      CAS blobs + action records, verify/gc/restore
               ├─ scheduler.ts  bounded DAG scheduler (critical path, cancel, fail-skip)
+              ├─ fswatch.ts    fs.watch wrapper (recursive / per-directory), raw hints only
+              ├─ watch.ts      watch session: debounce, reconcile, cancel, re-run
               ├─ runner.ts     spawn (no shell), env allow-list, redaction, kill group
               └─ engine.ts     fingerprint ► lookup ► run ► validate ► commit; explanations
 ```
@@ -48,10 +50,24 @@ package edges from manifests and observed imports), schedules only those
 packages' tasks (dependencies come in through `closure()`), and filters test
 selection per package.
 
+## Watch mode (`--watch`)
+
+`watch.ts` owns one long-lived session; the Project (config, FileIndex, graph) stays in memory and `runTasks` is called once per cycle.
+
+* **Events are hints, content decides.** `fswatch.ts` only reports "something under here may have changed". Each cycle runs `FileIndex.scan()` and diffs content digests against the previous cycle's snapshot, so a missed, duplicated or spurious event can cost time but never produce a stale result. Source changes (task outputs excluded) are what get reported as `changed`; a scan that finds none starts no cycle.
+* **Watcher backends.** Windows/macOS: one native recursive `fs.watch`. Linux: Node's recursive `fs.watch` is a userland emulation that watches every directory including `node_modules` and `.git`, so we register one non-recursive watcher per directory instead, skipping ignored trees and adding watchers for new directories. `per-directory` is also selectable on any platform (used by the tests).
+* **Debounce.** Leading + trailing: the first event after idle triggers immediately (no added latency); events inside the quiet window (default 50 ms) coalesce into one trailing trigger.
+* **Recovery.** A periodic reconciliation scan (default 30 s) catches dropped events. Any watcher error (inotify overflow/limits, handle loss) triggers an immediate forced rehash scan and degrades the period to 2 s. Metadata (mtime/size/inode) is only used as the existing racy-safe hint inside `scan`.
+* **No self-triggering.** Events under `.git`, `node_modules`, `.buildrush`, config `ignore` globs and any task's declared `outputs` are dropped, and output files are excluded from the change set. Files a task writes that are *not* declared as outputs or ignored will show up as changes; they only cause one extra all-cached cycle if their content is stable, so declare them or add them to `ignore`.
+* **Cancellation.** If an event arrives mid-run, a side-scan (a separate FileIndex, so the engine's index is untouched) checks whether a source file really changed; if so the run's AbortSignal fires. Cancelled tasks are never cached and the cycle is reported as `superseded`. The engine's existing post-run input check still refuses to cache results whose inputs changed during execution.
+* **Config.** A change to `buildrush.json` or any `package.json` re-opens the Project (adapters re-resolved). A config that fails to load is reported and nothing runs until the next change.
+* **Shutdown.** Ctrl+C aborts in-flight tasks, closes watchers and exits 0; a second Ctrl+C force-quits.
+* **`--affected` in watch mode** keeps its one-shot meaning (changes relative to git `--since`, default HEAD); the module graph is rebuilt from the refreshed index each cycle. Unchanged tasks are still `[cached]` through their fingerprints.
+
 ## Design decisions
 
 * **TypeScript on Node, zero runtime deps.** Smallest audit surface, runs where the target ecosystem already is, and avoids a second toolchain for contributors. A Rust/Go core remains possible behind the same on-disk formats if profiling shows Node is the bottleneck; we will not guess before measuring.
-* **One-shot, no daemon yet.** A daemon adds an IPC attack surface and crash/stale-state handling; the persisted file index already makes warm runs cheap (~0.2 s for BuildRush's own pipeline). We will add one only when watch mode needs it, with peer-credential-checked Unix sockets / named pipes.
+* **No daemon yet.** A daemon adds an IPC attack surface and crash/stale-state handling; the persisted file index already makes warm runs cheap (~0.2 s for BuildRush's own pipeline). `--watch` keeps state in the foreground process instead. A daemon (so separate invocations share warm state) remains to do, with peer-credential-checked Unix sockets / named pipes.
 * **Whole-task cache granularity** (see cache-correctness.md).
 * **JSON config**, to avoid a YAML dependency and ambiguity.
 
