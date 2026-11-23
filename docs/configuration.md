@@ -51,8 +51,13 @@ resolved to directories with a `package.json` that has a `name`; the root is not
 a package, `node_modules` and symlinks are never followed, duplicate names are
 an error. Each package records its name, version and which other workspace
 packages it depends on (`dependencies`, `devDependencies`,
-`optionalDependencies`; any declared range counts, `workspace:*` or not;
-`peerDependencies` are not ordering edges).
+`optionalDependencies`; any declared range counts, `workspace:*` or not).
+`peerDependencies` on another workspace package are also ordering edges (every
+package manager links them, and the package compiles against that package's
+output), except a peer edge that would close a cycle with declared dependencies:
+that one is dropped with a warning instead of becoming a cycle error (plugin /
+host pairs). As in pnpm, a trailing `/**` in a package glob also matches the
+directory itself (`docs/**` includes `docs/package.json`).
 
 A task with `"scope": "packages"` is a **template**: it is expanded into one
 task per package, named `<package>:<task>` (e.g. `@acme/core:build`).
@@ -65,6 +70,7 @@ task per package, named `<package>:<task>` (e.g. `@acme/core:build`).
     "command": "tsc -p .",              // runs with the package directory as cwd
     "inputs": ["src/**", "tsconfig.json"],   // relative to the package
     "outputs": ["dist/**"],             // relative to the package
+    "rootInputs": ["scripts/**"],       // optional: project-relative files OUTSIDE the package that every instance also hashes
     "dependsOn": ["^build"]             // "^build": build of this package's workspace dependencies
   },
   "test": { "scope": "packages", "kind": "test", "adapter": "vitest", "dependsOn": ["build"] }  // "build": this package's build
@@ -90,8 +96,16 @@ everything downstream that depends on B's task), and its input files:
 
 Root-shared files: root `package.json`, every lockfile (`package-lock.json`,
 `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock[b]`),
-`pnpm-workspace.yaml`, `.npmrc`, `.yarnrc[.yml]`, `.nvmrc`, `.node-version` and
-root `tsconfig*.json`. Changing any of them invalidates **every** package task.
+`pnpm-workspace.yaml`, `.npmrc`, `.yarnrc[.yml]`, `.nvmrc`, `.node-version`,
+root `tsconfig*.json` and root tool configs (`vitest.config.*`,
+`vitest.workspace.*`, `vite.config.*`, `jest.config.*`, `jest.*.config.*`,
+`eslint.config.*`, `.eslintrc*`, `babel.config.*`, `.babelrc[.*]`,
+`rollup.config.*`, `tsup.config.*`, `webpack.config.*`, `esbuild.config.*`).
+Changing any of them invalidates **every** package task. Anything else outside
+the packages that a task reads (a shared `scripts/` directory, a JSON file a root
+config loads, a config helper it imports) is **not** tracked automatically:
+list it in the task's `rootInputs`, otherwise editing it does not re-run the
+package tasks that declared their own `inputs`.
 Another task's outputs are still never inputs unless depended on.
 
 **`--affected` in a workspace.** Selected packages = packages containing changed
@@ -113,6 +127,37 @@ patterns), `main`, `module`, `types` that exists, with build-output directories
 mapped to `.ts`; failing that `src/index`, `index`, `lib/index`. An import of a
 workspace package that cannot be resolved is recorded as uncertain and handled
 conservatively (see rules below).
+
+### Validated on real repositories, and known limitations
+
+Workspace support was run (Windows, Node 24, shallow clones, installs with
+`--ignore-scripts`, tasks limited to tools already installed in the clone) on
+three open-source monorepos: **mobxjs/mobx** (npm `workspaces`, 6 packages,
+`exports` maps, `dist` -> `src`), **preactjs/signals** (pnpm, 15 packages incl.
+nested packages `packages/preact/utils`, root tsconfig `paths`) and
+**TanStack/store** (pnpm, `packages/**` globs, 45 packages incl. examples,
+`exports` + `workspace:*`/`catalog:`). In each, the package list and
+dependency edges matched the package manager's own view (`pnpm ls -r`, or the
+package.json files for npm) once the bugs below were fixed, module-to-package
+ownership and cross-package import resolution (including `dist` -> `src` and
+tsconfig `paths`) were correct on every edge inspected, a one-file edit in a leaf
+package re-ran exactly that package's tasks plus tasks of dependents, and
+`--affected` selected the expected packages. Not validated: TypeScript project
+references (`tsc -b`; none of the three repos uses them), yarn berry/bun
+layouts, Linux/macOS. Bugs found and fixed: `docs/**` did not match `docs/`
+itself; workspace `peerDependencies` were not ordering edges; root tool configs
+(`vitest.config.*` etc.) and shared root scripts were not fingerprinted by
+package tasks with declared `inputs` (new `rootInputs`); vitest coverage enabled
+in the config was not captured as an output.
+
+Known limitations (not fixed):
+
+* **Package tasks always run in the package directory.** Tools whose config assumes the repo root as cwd (signals' root `vitest.config.mjs` reads `./mangle.json`) fail; run them through the package manager, e.g. `pnpm -C ../.. exec vitest run packages/core/test`. There is no `$PACKAGE` substitution in commands, so a root config that selects tests by path needs one task template per package (use `packages` filters).
+* **`--affected` over-selects.** Imports in test fixtures/strings (mobx-undecorate "imports" mobx-react only inside test sources), `import type`, and import cycles all create package edges (editing `packages/preact/src/index.ts` in signals selected 12 of 15 packages because a type-only import closes a cycle through `debug`). Over-selection costs time, never correctness.
+* **Without declared `inputs`, tasks hash the dependency packages' whole directories** (including their build output), so a comment-only edit in a core package re-runs every dependent package's typecheck.
+* **Files outside the packages that a task reads** (shared scripts, files a root config imports) are tracked only if listed in `rootInputs`.
+* **Restoring cached outputs copies them**: on Windows a fully cached run of three `dist/` directories took several seconds in TanStack/store.
+* A tool that rewrites a tracked input during a task (pnpm 11 modified `pnpm-lock.yaml` while the TanStack/store tasks ran) is detected (`inputs changed during execution; result not cached`) but it makes that task, and then everything downstream, re-run each time.
 
 ## Commands
 

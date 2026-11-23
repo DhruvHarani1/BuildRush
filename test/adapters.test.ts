@@ -51,6 +51,20 @@ test('vite adapter refuses dev/preview servers', async () => {
   } finally { await rm(dir); }
 });
 
+test('vitest adapter: coverage enabled in the config (not on the command line) is an output too', async () => {
+  const on = await open({ 'vitest.config.ts': "export default { test: { coverage: { enabled: true, provider: 'istanbul' } } }" }, { t: { adapter: 'vitest' } });
+  const custom = await open({ 'vitest.config.ts': "export default { test: { coverage: { enabled: true, reportsDirectory: './out/cov' } } }" }, { t: { adapter: 'vitest' } });
+  const dyn = await open({ 'vitest.config.ts': 'export default { test: { coverage: { enabled: true, reportsDirectory: process.env.COV } } }' }, { t: { adapter: 'vitest' } });
+  const off = await open({ 'vitest.config.ts': "export default { test: { coverage: { provider: 'v8' } } }" }, { t: { adapter: 'vitest' } });
+  try {
+    assert.deepEqual(on.p.config.tasks.t!.outputs, ['coverage/**']);
+    assert.deepEqual(custom.p.config.tasks.t!.outputs, ['out/cov/**']);
+    assert.equal(dyn.p.config.tasks.t!.cache, false);
+    assert.match(dyn.p.config.tasks.t!.notes.join(' '), /reportsDirectory/);
+    assert.deepEqual(off.p.config.tasks.t!.outputs, []);
+  } finally { for (const x of [on, custom, dyn, off]) await rm(x.dir); }
+});
+
 test('vitest adapter: forces single-shot run, refuses watch/ui, captures coverage output', async () => {
   const a = await open({}, { t: { adapter: 'vitest', command: 'vitest --coverage' } });
   const bare = await open({}, { t: { adapter: 'vitest' } });

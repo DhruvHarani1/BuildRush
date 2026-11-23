@@ -32,6 +32,10 @@ export type WorkspaceManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 export const ROOT_SHARED = [
   'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
   'pnpm-workspace.yaml', '.npmrc', '.yarnrc', '.yarnrc.yml', '.nvmrc', '.node-version', 'tsconfig*.json',
+  // Root-level tool configs that monorepos share between packages (found on real repos: a root
+  // vitest.config.mjs driving every package's tests). Other shared files: task `rootInputs`.
+  'vitest.config.*', 'vitest.workspace.*', 'vite.config.*', 'jest.config.*', 'jest.*.config.*', 'eslint.config.*', '.eslintrc*',
+  'babel.config.*', '.babelrc', '.babelrc.*', 'rollup.config.*', 'tsup.config.*', 'webpack.config.*', 'esbuild.config.*',
 ];
 const isRootShared = compileGlobs(ROOT_SHARED);
 
@@ -212,8 +216,11 @@ export async function discoverWorkspaces(root: string, override: false | string[
   }
   if (patterns.length === 0) return null;
 
-  const positive = patterns.filter((p) => !p.startsWith('!')).map(normalizePattern);
-  const negative = patterns.filter((p) => p.startsWith('!')).map((p) => normalizePattern(p.slice(1)));
+  // pnpm appends "/package.json" to each pattern, so "docs/**" also matches docs/package.json:
+  // a trailing "/**" covers the directory itself, not just what is beneath it.
+  const withStem = (p: string): string[] => (p.endsWith('/**') ? [p, p.slice(0, -3)] : [p]);
+  const positive = patterns.filter((p) => !p.startsWith('!')).map(normalizePattern).flatMap(withStem);
+  const negative = patterns.filter((p) => p.startsWith('!')).map((p) => normalizePattern(p.slice(1))).flatMap(withStem);
   const include = compileGlobs(positive);
   const exclude = negative.length ? compileGlobs(negative) : () => false;
   const maxDepth = positive.some((p) => p.includes('**')) ? Infinity : Math.max(0, ...positive.map((p) => p.split('/').length));
@@ -240,6 +247,7 @@ export async function discoverWorkspaces(root: string, override: false | string[
   const packages: WorkspacePackage[] = [];
   const seen = new Map<string, string>();
   const issues: string[] = [];
+  const peers = new Map<string, string[]>();
   for (const dir of dirs) {
     const manifest = `${dir}/package.json`;
     const pkg = await readJson<Record<string, unknown>>(path.join(root, manifest));
@@ -262,6 +270,7 @@ export async function discoverWorkspaces(root: string, override: false | string[
       const v = pkg[field];
       if (isRecord(v)) for (const [k, range] of Object.entries(v)) dependencies[k] = String(range);
     }
+    if (isRecord(pkg.peerDependencies)) peers.set(pkg.name, Object.keys(pkg.peerDependencies));
     const str = (v: unknown) => (typeof v === 'string' ? v : null);
     packages.push({
       name: pkg.name,
@@ -276,6 +285,27 @@ export async function discoverWorkspaces(root: string, override: false | string[
   if (issues.length) throw new ConfigError(issues);
   for (const p of packages) {
     p.workspaceDeps = Object.keys(p.dependencies).filter((d) => d !== p.name && seen.has(d)).sort();
+  }
+  // A peer dependency on a workspace package is linked by every package manager and its build output
+  // is what this package compiles against (e.g. `@scope/utils` peers on `@scope/ui`), so it orders
+  // tasks and widens fingerprints like a normal dependency. Peer edges are common in plugin/host
+  // pairs, so one that would close a cycle with declared dependencies is dropped (with a warning)
+  // rather than turning a working workspace into a cycle error.
+  const reaches = (from: string, to: string, visited = new Set<string>()): boolean => {
+    if (from === to) return true;
+    if (visited.has(from)) return false;
+    visited.add(from);
+    return (packages.find((x) => x.name === from)?.workspaceDeps ?? []).some((d) => reaches(d, to, visited));
+  };
+  for (const p of packages) {
+    for (const peer of (peers.get(p.name) ?? []).sort()) {
+      if (peer === p.name || !seen.has(peer) || p.workspaceDeps.includes(peer)) continue;
+      if (reaches(peer, p.name)) {
+        warnings.push(`${p.manifest}: peerDependency ${JSON.stringify(peer)} not used as an ordering edge (it would close a dependency cycle)`);
+        continue;
+      }
+      p.workspaceDeps = [...p.workspaceDeps, peer].sort();
+    }
   }
   return new Workspace(await detectManager(root), source, patterns, packages, warnings);
 }
@@ -338,6 +368,7 @@ export function expandWorkspaceTasks(config: Config, ws: Workspace | null): Reco
         dependsOn: [],
         inputs: t.inputs ? [...t.inputs] : null,
         outputs: [...t.outputs],
+        rootInputs: [...t.rootInputs],
         env: [...t.env],
         passEnv: [...t.passEnv],
         cwd: p.dir,
@@ -411,11 +442,11 @@ export function finalizePackageTasks(config: Config): void {
     t.outputs = t.outputs.map(at);
     if (t.inputs === null) {
       if (t.adapter) continue; // unknowable inputs: whole project (safe)
-      t.inputs = [`${p.dir}/**`, ...p.depDirs.map((d) => `${d}/**`), ...ROOT_SHARED];
+      t.inputs = [`${p.dir}/**`, ...p.depDirs.map((d) => `${d}/**`), ...ROOT_SHARED, ...t.rootInputs];
     } else if (p.explicitInputs) {
-      t.inputs = [...t.inputs.map(at), `${p.dir}/package.json`, ...ROOT_SHARED];
+      t.inputs = [...t.inputs.map(at), `${p.dir}/package.json`, ...ROOT_SHARED, ...t.rootInputs];
     } else {
-      t.inputs = [...t.inputs.map(at), ...p.depDirs.map((d) => `${d}/**`), ...ROOT_SHARED];
+      t.inputs = [...t.inputs.map(at), ...p.depDirs.map((d) => `${d}/**`), ...ROOT_SHARED, ...t.rootInputs];
     }
   }
 }

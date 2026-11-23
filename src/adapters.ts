@@ -105,10 +105,25 @@ export async function resolveAdapter(name: AdapterName, cwd: string, t: TaskConf
       inputs = null;
       notes.push(`${cfg.file} customises include/root/setupFiles/dir or reaches outside the project: hashing the whole project to stay correct. List inputs explicitly to narrow.`);
     }
-    const outputs = command.some((a) => a === '--coverage' || a.startsWith('--coverage.')) ? ['coverage/**'] : [];
+    let outputs = command.some((a) => a === '--coverage' || a.startsWith('--coverage.')) ? ['coverage/**'] : [];
     if (outputs.length) notes.push('coverage enabled: coverage/** is captured as an output.');
+    let cache = true;
+    // Coverage switched on in the config (found on a real monorepo: `coverage: { enabled: true }` in every
+    // package) writes its report just like --coverage; undeclared, it would pollute other tasks' inputs.
+    const covBlock = /\bcoverage\s*:\s*\{[^}]*\benabled\s*:\s*true/.test(cfg?.text ?? '');
+    if (covBlock && !outputs.length) {
+      const rd = /\breportsDirectory\s*:\s*(['"`])([^'"`$\n]+)\1/.exec(cfg!.text);
+      const dir = rd ? safeOutDir(rd[2]!) : /\breportsDirectory\s*:/.test(cfg!.text) ? null : 'coverage';
+      if (dir === null) {
+        cache = false;
+        notes.push('coverage is enabled in the config but reportsDirectory is not a plain project-relative literal: outputs cannot be determined, caching disabled for this task. Set "outputs" explicitly to enable it.');
+      } else {
+        outputs = [`${dir}/**`];
+        notes.push(`coverage is enabled in ${cfg!.file}: ${dir}/** is captured as an output.`);
+      }
+    }
     notes.push('Test results are only reusable if tests are deterministic. Tests that use network, time or randomness must set "cache": false.');
-    return { command, inputs, outputs, ...base, envPrefixes: ['VITE_', 'VITEST_'], notes };
+    return { command, inputs, outputs, ...base, envPrefixes: ['VITE_', 'VITEST_'], cache, notes };
   }
 
   if (name === 'tsc') {
