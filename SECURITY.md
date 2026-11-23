@@ -40,6 +40,9 @@ pre-1.0. After 1.0 the latest two minor lines will be supported.
 * Secret disclosure through logs, cache metadata or child-process environments
 * Command or argument injection in BuildRush's own subprocess calls
 * Anything that makes BuildRush execute code the project config did not request
+* The optional local daemon ([docs/daemon.md](docs/daemon.md)): reaching it, or making it run
+  anything, as a different local user or without its token; token/endpoint disclosure to tasks or
+  logs; a way to make it serve stale results; a network listener of any kind
 * Supply-chain weaknesses in our release pipeline or published artifacts
 
 ## Out of scope

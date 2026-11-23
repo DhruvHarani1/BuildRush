@@ -7,7 +7,8 @@ exactly why anything ran.
 
 > **Status: early (0.1).** The core engine is real and tested (60 tests,
 > including adversarial cache/path/secret tests). Watch mode (`--watch`) is
-> available; the daemon is **not built yet**; see
+> available; an opt-in local daemon (`--daemon`) exists with small measured
+> gains; see
 > [ROADMAP.md](ROADMAP.md). No benchmark claims are made until the benchmark
 > suite exists.
 
@@ -21,6 +22,8 @@ npx buildrush run                     # again: everything is [cached]
 npx buildrush test --affected         # only tests that (transitively) import what you changed
 npx buildrush test --watch            # stay running; re-run only what each file change affects (also run/build/check)
 npx buildrush run --watch --json      # one JSON object per cycle (NDJSON) for editors and scripts
+npx buildrush daemon start|stop|status # optional per-project warm daemon (local socket/pipe, token-authenticated)
+npx buildrush run --daemon            # use it (starting it if needed); falls back to a normal run on any problem
 npx buildrush explain src/Button.tsx  # tasks, modules and tests this file affects, with import chains
 npx buildrush run build --affected    # monorepos: only changed packages and their dependents
 ```
