@@ -52,8 +52,10 @@ sends no telemetry.
 5. **Undeclared inputs** (files a task reads but that are not in `inputs`) are
    invisible. The default (`inputs` omitted) hashes the whole project to stay
    safe. See [cache-correctness.md](cache-correctness.md).
-6. **Windows** is untested. `.cmd` shims cannot be spawned without a shell, so
-   npm-installed tools may not resolve; BuildRush will not fall back to a shell.
+6. **Windows** is covered by CI. npm `.cmd` shims are unwrapped to their Node entry
+   point and run with `node`; an unrecognised `.cmd`/`.bat` is refused, never passed
+   through `cmd.exe`. Windows has no process groups, and file-permission guarantees
+   (cache dir, daemon token) rest on per-user profile ACLs rather than POSIX modes.
 7. **Remote/shared cache** does not exist yet and must not be bolted on without
    signed manifests, tenant isolation and authenticated transport (design notes
    in ROADMAP.md).
