@@ -26,8 +26,11 @@ export async function changedFilesFromGit(root: string, since = 'HEAD'): Promise
   if (since.startsWith('-')) return { ok: false, files: [], error: `invalid git ref ${JSON.stringify(since)}` };
   try {
     const opts = { cwd: root, maxBuffer: 64 * 1024 * 1024 };
-    const tracked = await pexec('git', ['diff', '--name-only', '-z', '--no-renames', '--relative', since, '--'], opts);
-    const untracked = await pexec('git', ['ls-files', '--others', '--exclude-standard', '-z'], opts);
+    // Two independent git processes: run them concurrently (process start-up dominates, esp. on Windows).
+    const [tracked, untracked] = await Promise.all([
+      pexec('git', ['diff', '--name-only', '-z', '--no-renames', '--relative', since, '--'], opts),
+      pexec('git', ['ls-files', '--others', '--exclude-standard', '-z'], opts),
+    ]);
     const files = new Set<string>();
     for (const out of [tracked.stdout, untracked.stdout]) for (const f of out.split('\0')) if (f) files.add(f);
     return { ok: true, files: [...files].sort() };

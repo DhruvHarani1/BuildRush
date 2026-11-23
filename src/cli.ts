@@ -262,7 +262,11 @@ function line(r: TaskReport, verbose: boolean): string {
   const colored = r.state === 'failed' ? paint(31, label) : r.state === 'cached' ? paint(32, label) : r.state === 'succeeded' ? paint(36, label) : paint(33, label);
   const pad = ' '.repeat(Math.max(0, 11 - label.length));
   let s = `${colored}${pad} ${r.task.padEnd(14)} ${fmtMs(r.durationMs).padStart(7)}`;
-  if (r.state === 'cached') s += `  ${dim(`restored ${fmtBytes(r.restoredBytes)}`)}`;
+  if (r.state === 'cached') s += `  ${dim(r.testCache ? `${r.testCache.skipped.length} test file(s) skipped` : `restored ${fmtBytes(r.restoredBytes)}`)}`;
+  if (r.testCache) {
+    for (const x of r.testCache.skipped) s += `\n             ${dim(`skip ${x.test}: ${x.reason}`)}`;
+    if (verbose) for (const x of r.testCache.ran) s += `\n             ${dim(`run  ${x.test}: ${x.reason}`)}`;
+  }
   if (r.state === 'succeeded' && r.reasons.length) s += `  ${dim('why: ' + r.reasons[0] + (r.reasons.length > 1 ? ` (+${r.reasons.length - 1} more)` : ''))}`;
   if (r.notes.length && (verbose || r.state !== 'cached')) for (const n of r.notes) s += `\n             ${dim('note: ' + n)}`;
   if (verbose && r.reasons.length > 1) for (const x of r.reasons.slice(1)) s += `\n             ${dim('why: ' + x)}`;

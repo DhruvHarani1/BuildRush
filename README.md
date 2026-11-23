@@ -63,7 +63,7 @@ What this says honestly: the cache pays off when nothing relevant changed (the c
 
 ## Requirements
 
-Node.js ≥ 22 on Linux or macOS (Windows untested). Zero runtime dependencies.
+Node.js ≥ 22 on Linux, macOS and Windows (CI runs all three). On Windows, npm `.cmd` shims are unwrapped and their Node target is run directly; arguments are never passed through `cmd.exe`. Zero runtime dependencies.
 **Do not run BuildRush on repositories you do not trust**: the config runs commands as you.
 
 ## License

@@ -127,12 +127,18 @@ test('index detects content changes even when mtime is preserved', async () => {
   } finally { await rm(dir); }
 });
 
-test('symlinks are never followed or indexed', async () => {
+test('symlinks are never followed or indexed', async (t) => {
   const dir = await tmpProject({ 'buildrush.json': cfg(), 'src/real.ts': 'x' });
   const outside = await tmpProject({ 'secret.txt': 'top secret' });
   try {
-    await fs.symlink(path.join(outside, 'secret.txt'), path.join(dir, 'src/link.txt'));
-    await fs.symlink(outside, path.join(dir, 'src/linkdir'));
+    try {
+      await fs.symlink(path.join(outside, 'secret.txt'), path.join(dir, 'src/link.txt'));
+      await fs.symlink(outside, path.join(dir, 'src/linkdir'), 'dir');
+    } catch (e) {
+      // Windows needs Developer Mode or elevation to create symlinks; nothing to test without them.
+      if ((e as NodeJS.ErrnoException).code === 'EPERM') return t.skip('cannot create symlinks on this machine');
+      throw e;
+    }
     const p = await Project.open(dir);
     assert.ok(![...p.index.files.keys()].some((k) => k.includes('link') || k.includes('secret')));
     assert.equal(p.index.skippedSymlinks.length, 2);

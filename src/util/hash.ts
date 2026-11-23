@@ -34,7 +34,10 @@ function sort(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(sort);
   if (v && typeof v === 'object') {
     const out: Record<string, unknown> = {};
-    for (const k of Object.keys(v as object).sort()) out[k] = sort((v as Record<string, unknown>)[k]);
+    for (const k of Object.keys(v as object).sort()) {
+      // defineProperty, not assignment: `out["__proto__"] = x` would set the prototype and drop the key.
+      Object.defineProperty(out, k, { value: sort((v as Record<string, unknown>)[k]), enumerable: true, writable: true, configurable: true });
+    }
     return out;
   }
   return v;
