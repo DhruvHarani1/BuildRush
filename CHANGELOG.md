@@ -4,6 +4,8 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-23
+
 ### Added
 - Optional local daemon: `buildrush daemon start|stop|status` and `--daemon` / `BUILDRUSH_DAEMON=1` (off by default) for `run/build/test/check`, `analyze --json` and `cache stats`. Unix socket / named pipe only, per-daemon token (0600 file in a 0700 per-user dir), closed op set, same engine path, serialised runs, stale-state recovery, idle exit, version handshake, one-shot fallback on any error. Design and threat model: docs/daemon.md; benchmark: `bench/daemon.mjs`.
 - `RunOptions.env` and `Project.open({ env, warm })` (library API) so a long-lived host can run with the caller's environment and reuse a re-validated index/graph.
@@ -25,6 +27,12 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - Watch mode: `run|build|test|check --watch` keeps the Project, index and graph in memory, re-runs only affected work on each change (unchanged tasks are `[cached]`), cancels obsolete in-flight runs, reconciles by content digest on a timer and after watcher errors, and with `--json` prints one object per cycle. See docs/architecture.md.
 
 ### Fixed
+- Windows: npm-installed tools (`tsc`, `vite`, `vitest`) could not be started at all (`spawn EINVAL` on `.cmd` shims). Shims are now unwrapped to their Node entry point and run with `node`; unrecognised `.cmd`/`.bat` files are refused, never passed through `cmd.exe`.
+- Windows: concurrent cache writes of identical content failed with `EPERM` on rename; renames retry briefly and treat an already-stored, digest-verified blob as success.
+- Security: the glob matcher took exponential time on adversarial config patterns (ReDoS); it is now a linear-time NFA matcher.
+- Security: the import scanner could take cubic time on long whitespace runs (CodeQL js/polynomial-redos); replaced with a bounded linear scan.
+- Path validation accepted `./` and drive-relative segments; cache keys ignored a file literally named `__proto__`; workspace `exports` targets replaced only the first `*`.
+- `buildrush doctor` no longer warns that Windows is untested.
 - A long-lived process could reuse a stale executable digest after the binary was replaced: the digest memo is now keyed by file identity.
 - A task's inputs could include another, unrelated task's outputs (found by the benchmark suite).
 
