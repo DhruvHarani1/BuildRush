@@ -51,6 +51,8 @@ export interface TaskConfig {
   scope: TaskScope;
   /** scope "packages" only: package-name globs restricting where the task runs (null = every package). */
   packages: string[] | null;
+  /** scope "packages" only: project-relative globs (outside the package) every instance also hashes, e.g. a shared root script or tool config. */
+  rootInputs: string[];
   /** Non-null on expanded per-package instances. */
   package: PackageRef | null;
 }
@@ -116,7 +118,7 @@ export function splitCommand(cmd: string): string[] {
 }
 
 const TASK_KEYS = new Set([
-  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'scope', 'packages', 'testCache',
+  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'scope', 'packages', 'rootInputs', 'testCache',
 ]);
 const TOP_KEYS = new Set(['$schema', 'version', 'project', 'tasks', 'pipelines', 'ignore', 'concurrency', 'cache', 'tests', 'workspaces']);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -228,6 +230,14 @@ export function validateConfig(raw: unknown): Config {
           if (pkgFilter) checkGlobs(pkgFilter, `${w}.packages`, issues);
         }
       }
+      let rootInputs: string[] = [];
+      if (t.rootInputs !== undefined) {
+        if (scope !== 'packages') issues.push(`${w}.rootInputs: only valid together with scope "packages"`);
+        else {
+          rootInputs = strArray(t.rootInputs, `${w}.rootInputs`, issues) ?? [];
+          checkGlobs(rootInputs, `${w}.rootInputs`, issues);
+        }
+      }
       if (scope === 'packages' && t.cwd !== undefined) {
         issues.push(`${w}.cwd: not allowed with scope "packages" (every instance runs in its own package directory)`);
       }
@@ -253,6 +263,7 @@ export function validateConfig(raw: unknown): Config {
         notes: [],
         scope,
         packages: pkgFilter,
+        rootInputs,
         package: null,
       };
     }
