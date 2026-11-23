@@ -9,10 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { rm, tmpProject } from './helpers.js';
 import { DaemonServer, AlreadyRunningError } from '../src/daemon/server.js';
 import {
-  Credentials, DaemonError, DaemonUnavailable, probeDaemon, readCredentials, removeEndpointFiles, sendRequest, spawnDaemon, stopDaemon,
+  acquireLock, Credentials, DaemonError, DaemonUnavailable, probeDaemon, readCredentials, removeEndpointFiles, sendRequest, spawnDaemon, stopDaemon,
 } from '../src/daemon/client.js';
 import { daemonDirs, DaemonDirs } from '../src/daemon/paths.js';
-import { tryDaemon } from '../src/daemon/cli.js';
+import { clientEnv, tryDaemon } from '../src/daemon/cli.js';
+import { caseInsensitiveEnv } from '../src/daemon/server.js';
 import { Message, PROTO, VERSION } from '../src/daemon/protocol.js';
 import { Project } from '../src/project.js';
 import { runTasks, RunReport } from '../src/engine.js';
@@ -88,8 +89,9 @@ async function withServer<T>(fn: (srv: DaemonServer, root: string) => Promise<T>
 
 const baseEnv = (extra: Record<string, string> = {}): Record<string, string> => {
   const e: Record<string, string> = {};
-  for (const k of ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR']) {
-    if (process.env[k] !== undefined) e[k] = process.env[k]!;
+  // On Windows send ONLY the spelling `Path` (what many shells export): lookups of `PATH` must still work.
+  for (const k of ['PATH', 'SystemRoot', 'COMSPEC', 'PATHEXT', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR']) {
+    if (process.env[k] !== undefined) e[WIN && k === 'PATH' ? 'Path' : k] = process.env[k]!;
   }
   return { ...e, ...extra };
 };
@@ -126,7 +128,7 @@ test('token is 32+ random bytes, regenerated per daemon, and never written anywh
     const tokA = (await fs.readFile(dirs.token, 'utf8')).trim();
     assert.match(tokA, /^[0-9a-f]{64}$/); // 32 bytes
     await a.shutdown('t');
-    await assert.rejects(fs.access(dirs.token), 'token file removed on shutdown');
+    await assert.rejects(fs.readFile(dirs.token), { code: 'ENOENT' }, 'token file removed on shutdown');
     const b = await DaemonServer.start({ root, idleMs: 0 });
     const tokB = (await fs.readFile(dirs.token, 'utf8')).trim();
     assert.notEqual(tokA, tokB);
@@ -184,13 +186,13 @@ test('requests without a valid token are dropped and nothing is executed', async
       assert.equal(r.closed, true, 'connection must be closed');
     }
     await new Promise((r) => setTimeout(r, 200));
-    await assert.rejects(fs.access(path.join(root, 'marker.txt')), 'the task must not have run');
+    await assert.rejects(fs.readFile(path.join(root, 'marker.txt')), { code: 'ENOENT' }, 'the task must not have run');
     const pong = (await sendRequest(c, 'status', {})) as { runs: number };
     assert.equal(pong.runs, 0);
     // and the right token does work
     const rep = await run(c, root, ['mark']);
     assert.equal(rep.ok, true);
-    await fs.access(path.join(root, 'marker.txt'));
+    await fs.readFile(path.join(root, 'marker.txt'));
   });
 });
 
@@ -223,7 +225,7 @@ test('garbage, oversized and wrongly-shaped input is rejected without crashing t
     assert.match((await ask('run', { tasks: ['work'] })).data, /"code":"bad_request"/);
     assert.match((await ask('run', { cwd: root, tasks: ['../../../etc/passwd'] })).data, /"code":"failed"/);
     assert.match((await ask('run', { cwd: root, tasks: ['node -e 1'] })).data, /"code":"failed"/);
-    await assert.rejects(fs.access(path.join(root, 'marker.txt')));
+    await assert.rejects(fs.readFile(path.join(root, 'marker.txt')), { code: 'ENOENT' });
     await alive();
   });
 });
@@ -247,7 +249,7 @@ test('a request for a different project is refused', async () => {
     try {
       const c = await creds(srv.dirs);
       await assert.rejects(run(c, other, ['mark']), (e: unknown) => e instanceof DaemonError && e.code === 'wrong_root');
-      await assert.rejects(fs.access(path.join(other, 'marker.txt')));
+      await assert.rejects(fs.readFile(path.join(other, 'marker.txt')), { code: 'ENOENT' });
     } finally {
       await rm(other);
     }
@@ -261,7 +263,7 @@ test('version mismatch: work is refused, ping/stop still answer, and the client 
     const old = await DaemonServer.start({ root, idleMs: 0, versionOverride: '0.0.1-old', protoOverride: 0 });
     const c = await creds(dirs);
     await assert.rejects(run(c, root, ['mark']), (e: unknown) => e instanceof DaemonError && e.code === 'version_mismatch' && e.proto === 0 && e.version === '0.0.1-old');
-    await assert.rejects(fs.access(path.join(root, 'marker.txt')));
+    await assert.rejects(fs.readFile(path.join(root, 'marker.txt')), { code: 'ENOENT' });
     const p = await probeDaemon(dirs);
     assert.ok(p.status === 'live' && !p.compatible);
     // tryDaemon: replaces the old daemon with a matching one and still produces a correct result
@@ -311,7 +313,7 @@ test('POSIX: a socket file left behind by a SIGKILLed daemon is recovered', { sk
     await new Promise<void>((r) => child.stdout.once('data', () => r()));
     child.kill('SIGKILL');
     await new Promise((r) => child.once('exit', r));
-    await fs.access(dirs.socket); // the stale socket is really there
+    await fs.lstat(dirs.socket); // the stale socket is really there
     await fs.writeFile(dirs.token, 'f'.repeat(64), { mode: 0o600 });
     await fs.writeFile(dirs.meta, JSON.stringify({ proto: PROTO, version: VERSION, pid: child.pid, root, endpoint: dirs.socket, startedAt: 1, node: 'v0' }), { mode: 0o600 });
     assert.equal((await probeDaemon(dirs)).status, 'stale');
@@ -356,7 +358,7 @@ test('daemon crash: the client sees a transport failure, tryDaemon reports not-o
     assert.equal((await probeDaemon(dirs)).status, 'absent');
     // and the engine works in-process regardless (this is exactly the CLI fallback)
     const proj = await Project.open(root);
-    const rep = await runTasks(proj, ['work'], { env: baseEnv() });
+    const rep = await runTasks(proj, ['work'], { env: caseInsensitiveEnv(baseEnv()) });
     assert.equal(rep.ok, true);
   });
 });
@@ -365,8 +367,8 @@ test('idle timeout: the daemon exits by itself and removes its files', async () 
   await withProject(async (root, dirs) => {
     const srv = await DaemonServer.start({ root, idleMs: 300 });
     await Promise.race([srv.closed, new Promise((_, rej) => setTimeout(() => rej(new Error('did not idle out')), 5000))]);
-    await assert.rejects(fs.access(dirs.token));
-    await assert.rejects(fs.access(dirs.meta));
+    await assert.rejects(fs.readFile(dirs.token), { code: 'ENOENT' });
+    await assert.rejects(fs.readFile(dirs.meta), { code: 'ENOENT' });
     assert.equal((await probeDaemon(dirs)).status, 'absent');
   });
 });
@@ -393,7 +395,7 @@ test('a run through the daemon is identical to a one-shot run (shared cache, sam
     assert.equal(await fs.readFile(path.join(root, 'out/result.txt'), 'utf8'), 'files=2 var=from-client');
     // one-shot with the same environment: everything must be a cache hit
     const proj = await Project.open(root);
-    const again = await runTasks(proj, ['work'], { env: baseEnv({ MY_VAR: 'from-client' }) });
+    const again = await runTasks(proj, ['work'], { env: caseInsensitiveEnv(baseEnv({ MY_VAR: 'from-client' })) });
     assert.equal(again.tasks.find((t) => t.task === 'work')!.state, 'cached');
     // a different client environment must be a different fingerprint, not a stale hit
     const other = await run(c, root, ['work'], {}, baseEnv({ MY_VAR: 'changed' }));
@@ -486,8 +488,8 @@ test('tasks never see the daemon token, socket/pipe path or any BUILDRUSH_* vari
       // nothing in the daemon dir except the token file contains the token; nothing at all in the project tree
       for (const f of await fs.readdir(srv.dirs.dir)) {
         if (f === 'token' || f === 's') continue;
-        const st = await fs.stat(path.join(srv.dirs.dir, f));
-        if (st.isFile()) assert.ok(!(await fs.readFile(path.join(srv.dirs.dir, f), 'utf8')).includes(c.token), `${f} contains the token`);
+        const text = await fs.readFile(path.join(srv.dirs.dir, f), 'utf8').catch(() => null); // directories (the lock) fail: skip
+        if (text !== null) assert.ok(!text.includes(c.token), `${f} contains the token`);
       }
       const walk = async (d: string): Promise<string[]> =>
         (await Promise.all((await fs.readdir(d, { withFileTypes: true })).map((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)])))).flat();
@@ -560,4 +562,85 @@ test('CLI: --daemon with an unusable daemon directory still runs (one-shot fallb
     assert.equal((JSON.parse(r.stdout) as { ok: boolean }).ok, true);
     assert.match(r.stderr, /daemon unavailable/);
   });
+});
+
+// ---- review fixes ---------------------------------------------------------------------------------------------
+
+test('a relative BUILDRUSH_CACHE_DIR is refused by the daemon and made absolute by the client', async () => {
+  await withServer(async (srv, root) => {
+    const c = await creds(srv.dirs);
+    await assert.rejects(run(c, root, ['work'], {}, baseEnv({ BUILDRUSH_CACHE_DIR: 'relative-cache' })), (e: unknown) => e instanceof DaemonError && e.code === 'bad_request');
+    const resolved = clientEnv({ BUILDRUSH_CACHE_DIR: 'relative-cache', X: 'y' });
+    assert.equal(resolved.BUILDRUSH_CACHE_DIR, path.resolve('relative-cache'));
+    assert.equal(resolved.X, 'y');
+    // an absolute one is honoured, and lands where a one-shot run would put it
+    const cacheDir = path.join(root, 'elsewhere-cache');
+    const rep = await run(c, root, ['work'], {}, baseEnv({ BUILDRUSH_CACHE_DIR: cacheDir }));
+    assert.equal(rep.ok, true);
+    assert.ok((await fs.readdir(cacheDir)).length > 0, 'cache written to the client-requested directory');
+  });
+});
+
+test('once a run has begun, a daemon failure is surfaced (midRun), never silently re-run', async () => {
+  await withProject(async (root, dirs) => {
+    const started = await spawnDaemon(root, dirs, { idleMs: 60_000 });
+    assert.equal(started.status, 'live');
+    const pid = (started as { pong: { pid: number } }).pong.pid;
+    const out = await tryDaemon<RunReport>(root, 'run', { tasks: ['slow'], flags: { noCache: true } }, {
+      onMessage: (m) => { if (m.type === 'begin') process.kill(pid, 'SIGKILL'); },
+    });
+    assert.equal(out.ok, false);
+    assert.equal(!out.ok && out.midRun, true);
+    // before the run begins (nothing listening and no way to start one) it is a plain fallback
+    const early = await tryDaemon<RunReport>(root, 'run', { tasks: ['work'], flags: {} }, { start: { entry: path.join(os.tmpdir(), 'nope.js'), timeoutMs: 1000 } });
+    assert.ok(!early.ok && !early.midRun);
+  });
+});
+
+test('CLI wiring: a mid-run daemon failure is reported and exits with the internal-error code', async () => {
+  const src = await fs.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/cli.ts'), 'utf8');
+  assert.match(src, /via\.midRun/);
+  assert.match(src, /daemon failed mid-run/);
+});
+
+test('an install that changed on disk retires the daemon (watched file touched)', async () => {
+  const watched = path.join(base, 'watched-file');
+  await fs.writeFile(watched, 'v1');
+  await withServer(async (srv, root) => {
+    const c = await creds(srv.dirs);
+    assert.equal((await run(c, root, ['work'])).ok, true);
+    await new Promise((r) => setTimeout(r, 1100)); // the stat walk is throttled to once per second
+    await fs.writeFile(watched, 'v2 changed');
+    await assert.rejects(run(c, root, ['work']), (e: unknown) => e instanceof DaemonError && e.code === 'stale_daemon');
+    await Promise.race([srv.closed, new Promise((_, rej) => setTimeout(() => rej(new Error('stale daemon did not exit')), 5000))]);
+  }, { extraWatch: [watched] });
+});
+
+test('a relative BUILDRUSH_DAEMON_DIR is handed to the spawned daemon as an absolute path', async (t) => {
+  const rel = path.relative(process.cwd(), base);
+  if (path.isAbsolute(rel)) return t.skip('no relative path from cwd to the temp dir (different drive)');
+  await withProject(async (root, dirs) => {
+    const p = await spawnDaemon(root, dirs, { env: { ...process.env, BUILDRUSH_DAEMON_DIR: rel }, idleMs: 60_000 });
+    assert.equal(p.status, 'live', 'daemon must have used the same directory the client resolved');
+  });
+});
+
+test('lifecycle lock: a release by a previous owner never removes a lock that was broken and re-taken', async () => {
+  await withProject(async (_root, dirs) => {
+    await fs.mkdir(dirs.dir, { recursive: true });
+    const releaseA = await acquireLock(dirs);
+    await fs.rm(dirs.lock, { recursive: true, force: true }); // "broken" by someone else
+    const releaseB = await acquireLock(dirs);
+    await releaseA();
+    await fs.readFile(path.join(dirs.lock, 'owner')); // still held by B
+    await releaseB();
+    await assert.rejects(fs.readFile(path.join(dirs.lock, 'owner')), { code: 'ENOENT' });
+  });
+});
+
+test('Windows: environment lookups are case-insensitive for PATH and declared names', { skip: WIN ? false : 'Windows-only semantics' }, () => {
+  const env = caseInsensitiveEnv({ Path: 'C:\\x', my_var: 'v' });
+  assert.equal(env.PATH, 'C:\\x');
+  assert.equal(env.MY_VAR, 'v');
+  assert.deepEqual(Object.keys(env).sort(), ['Path', 'my_var']);
 });

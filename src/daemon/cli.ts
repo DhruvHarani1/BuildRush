@@ -1,7 +1,8 @@
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { findProjectRoot } from '../config.js';
 import {
-  DaemonError, DaemonUnavailable, Probe, probeDaemon, removeEndpointFiles, sendRequest, spawnDaemon, stopDaemon, StartOptions,
+  DaemonError, DaemonUnavailable, Probe, probeDaemon, cleanupStale, sendRequest, spawnDaemon, stopDaemon, StartOptions,
 } from './client.js';
 import { DaemonDirs, daemonDirs } from './paths.js';
 import { Message, Op, VERSION } from './protocol.js';
@@ -36,7 +37,15 @@ async function locate(startDir: string): Promise<{ root: string; dirs: DaemonDir
   return { root, dirs: daemonDirs(root) };
 }
 
-export type DaemonOutcome<T> = { ok: true; data: T } | { ok: false; reason: string };
+/** The client's environment, with path-valued settings made absolute against THIS process's cwd. */
+export function clientEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) if (v !== undefined) out[k] = v;
+  for (const k of Object.keys(out)) if (k.toUpperCase() === 'BUILDRUSH_CACHE_DIR' && out[k] !== '') out[k] = path.resolve(out[k]);
+  return out;
+}
+
+export type DaemonOutcome<T> = { ok: true; data: T } | { ok: false; reason: string; midRun?: boolean };
 
 /**
  * Try to serve `op` from the project's daemon (starting it if needed). Never throws and never
@@ -49,13 +58,16 @@ export async function tryDaemon<T>(
   args: Record<string, unknown>,
   hooks: { signal?: AbortSignal; onMessage?: (m: Message) => void; start?: StartOptions; version?: string; proto?: number } = {},
 ): Promise<DaemonOutcome<T>> {
+  // Once a run has BEGUN, work may have executed (and orphaned children may still be writing): a silent
+  // in-process re-run could double side effects, so from that point failures are surfaced, not retried.
+  let begun = false;
   try {
     const loc = await locate(startDir);
     if (!loc) return { ok: false, reason: 'no project' };
     const { root, dirs } = loc;
     let pr: Probe = await probeDaemon(dirs);
     if (pr.status === 'stale') {
-      await removeEndpointFiles(dirs, pr.meta.pid);
+      await cleanupStale(dirs);
       pr = { status: 'absent' };
     }
     if (pr.status === 'live' && !pr.compatible) {
@@ -66,8 +78,12 @@ export async function tryDaemon<T>(
     if (pr.status === 'absent') pr = await spawnDaemon(root, dirs, hooks.start);
     if (pr.status !== 'live') return { ok: false, reason: pr.status === 'unreachable' ? pr.reason : 'daemon did not start' };
     if (!pr.compatible) return { ok: false, reason: 'daemon version mismatch' };
-    const data = await sendRequest(pr.creds, op, { cwd: startDir, env: process.env, ...args }, {
-      signal: hooks.signal, onMessage: hooks.onMessage, version: hooks.version, proto: hooks.proto,
+    const data = await sendRequest(pr.creds, op, { cwd: startDir, env: clientEnv(), ...args }, {
+      signal: hooks.signal,
+      onMessage: (m) => {
+        if (m.type === 'begin') begun = true;
+        hooks.onMessage?.(m);
+      }, version: hooks.version, proto: hooks.proto,
     });
     return { ok: true, data: data as T };
   } catch (e) {
@@ -80,8 +96,7 @@ export async function tryDaemon<T>(
         }
       } catch { /* best effort */ }
     }
-    const partial = e instanceof DaemonUnavailable && e.sawOutput;
-    return { ok: false, reason: `${(e as Error).message}${partial ? ' (mid-run)' : ''}` };
+    return { ok: false, reason: (e as Error).message, midRun: begun && op === 'run' };
   }
 }
 
@@ -98,7 +113,7 @@ export async function cmdDaemon(sub: string | undefined, startDir: string, f: Da
 
   let pr = await probeDaemon(dirs);
   if (pr.status === 'stale') {
-    await removeEndpointFiles(dirs, pr.meta.pid);
+    await cleanupStale(dirs);
     if (!f.json && sub !== 'status') console.log(`removed stale daemon files (${pr.reason})`);
     pr = { status: 'absent' };
   }

@@ -52,6 +52,8 @@ whoever can read the token can already run your tasks or edit your config.
 | Unauthenticated / other-user access to the daemon | Unix socket / named pipe only (no TCP); `0700` per-user directory outside the project; 32-byte random token per daemon start, constant-time compare, required on every connection; no reply on failure | `daemon.test.ts` (auth, garbage, oversize, slow-loris, wrong root) |
 | Daemon executing request content | Closed op list; `run` accepts only names of tasks already in `buildrush.json`; strict argument validation; same engine path as one-shot | `daemon.test.ts` |
 | Token/endpoint leaking to tasks or logs | Token only in memory and its `0600` file; never in argv/env; engine allow-list env and `BUILDRUSH_*` stripping; log holds fixed strings only | `daemon.test.ts` (child env dump, tree-wide grep) |
+| Silent double execution after a daemon failure | Failures after a run began are surfaced (exit 3), never retried in-process | `daemon.test.ts` |
+| Cache split / planted cache via relative path | Client resolves `BUILDRUSH_CACHE_DIR` absolute; daemon rejects relative values | `daemon.test.ts` |
 | Stale results from a warm daemon | Index re-scanned every request, config re-resolved, graph keyed by content digests, executable digests keyed by file identity; stale-install self-exit | `daemon.test.ts` |
 | Orphaned processes | Tasks run in their own process group; cancellation sends SIGTERM then SIGKILL after 5 s | `engine.test.ts` |
 | Running as root | `doctor` warns | `doctor` |

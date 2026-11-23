@@ -16,11 +16,14 @@ crash handling. The decisions below keep the security model unchanged
    unless `--daemon` or `BUILDRUSH_DAEMON=1` is given (`--no-daemon` wins). Auto-start is
    **off by default**: a background process surprising people (CI, containers, `npx`) costs more
    than the measured saving (see Measurements). With the opt-in, the daemon is started on demand.
-2. **Every failure falls back to a normal one-shot run.** Connection refused, stale files, bad
-   token, version mismatch, protocol error, a daemon that crashes mid-run: the CLI runs the same
-   command in-process. If the daemon dies mid-run the finished work is re-validated by the cache,
-   so the re-run is correct and mostly free. Usage/config errors are always reported by the
-   in-process path so messages and exit codes are identical.
+2. **Every failure BEFORE a run begins falls back to a normal one-shot run.** Connection refused,
+   stale files, bad token, version mismatch, handshake or protocol error, unknown task: the CLI runs the
+   same command in-process (usage/config errors are always reported by that path, so messages and
+   exit codes are identical). **Once the daemon has sent `begin` for a `run`, failures are NOT retried
+   silently**: tasks may already have executed (and orphaned children may still be writing), so a
+   silent re-run could repeat non-cacheable side effects. The CLI prints that the daemon failed
+   mid-run and exits 3; re-run explicitly (the cache makes that cheap), with `--no-daemon` if it recurs.
+   `analyze` and `cache stats` are read-only and always fall back.
 3. **No network listener, ever.** Unix domain socket (POSIX) / named pipe (Windows). No TCP,
    no `0.0.0.0`, no localhost port.
 4. **One daemon per project root**, keyed by `sha256(realpath(root))[0..16]` (lower-cased on
@@ -54,6 +57,11 @@ crash handling. The decisions below keep the security model unchanged
    fingerprints and child environments are what a one-shot run in the client's shell would use.
    Child environments remain the engine's allow-list; `BUILDRUSH_*` is still stripped, and the
    token/endpoint are in neither the daemon's environment nor argv, so no child can inherit them.
+   On Windows the client's environment is exposed to the engine with case-insensitive lookups (`Path` is
+   `PATH`), as `process.env` is. Path-valued settings are made absolute by the **client** against its own
+   cwd (`BUILDRUSH_CACHE_DIR`); the daemon rejects a relative value (`bad_request`) because it would
+   resolve against the daemon's cwd, split the cache from one-shot runs and could land in a shared
+   directory. `BUILDRUSH_DAEMON_DIR` is likewise passed to the spawned daemon already absolute.
 9. **What stays warm**: the `FileIndex` (not re-read from `index.json`), the dependency graph
    (keyed by a digest of every non-output file digest + test patterns + workspace layout, so it is
    rebuilt exactly when an input changed), the compiled-glob and executable-digest memos (the
@@ -67,15 +75,18 @@ crash handling. The decisions below keep the security model unchanged
     warm index and the cache). A second concurrent client receives `queued` and waits; a client that
     disconnects (or sends `cancel`) cancels its own work and its queue slot.
 11. **Lifecycle.** Start is serialised by a lock directory plus a liveness probe, so concurrent
-    starters converge on one daemon (losers exit 0). Liveness is an **authenticated ping**, never
+    starters converge on one daemon (losers exit 0). The lock carries an owner nonce, so a previous
+    owner can never release a lock that was broken and re-taken; stale-file cleanup by clients takes the same lock
+    and re-probes under it before deleting. Liveness is an **authenticated ping**, never
     "the file exists" or "that pid exists" (pids are reused). An unanswered endpoint that refuses
     connections (`ECONNREFUSED`/`ENOENT`/`ENOTSOCK`) is *stale*: its token, metadata and socket are
     removed (only if the metadata still names the pid we saw). An endpoint that exists but does not
     answer (busy, wrong owner, bad permissions) is *unreachable* and is never touched. Idle auto-exit
     after 10 minutes (`BUILDRUSH_DAEMON_IDLE_MS`, `0` disables), not while work is queued or a client
     is connected. `stop`, `SIGINT`, `SIGTERM`: stop accepting, cancel runs, wait up to 5 s, remove
-    files. Uncaught errors clean up and exit 1. A daemon whose Node binary or BuildRush install
-    changed on disk reports `stale_daemon` and exits.
+    files. Uncaught errors clean up and exit 1. A daemon whose Node binary, `package.json` or
+    anything under `dist/src` (newest mtime + file count, stat-walked at most once per second) changed
+    reports `stale_daemon` and exits.
 12. **Version handshake.** Every request carries `proto` and the client's BuildRush version. If either
     differs from the daemon's, work is refused with `version_mismatch` (carrying the daemon's values).
     `ping`, `status` and `stop` are served across versions, so the envelope fields `proto`,
@@ -117,6 +128,13 @@ boundary as the rest of BuildRush ([security.md](security.md)).
   and SYSTEM can always read it. `NTFS` mode bits are not checked (they do not exist).
 
 ## Consequences / residual risks
+
+* Lock breaking (abandoned lock older than 15 s) races a stat against a rename: worst case two starters
+  briefly overlap, which the atomic endpoint bind still resolves. Availability only, never a security issue.
+* A cache directory (`BUILDRUSH_CACHE_DIR` / config) owned by another user is not refused on POSIX; the
+  daemon no longer resolves one against its own cwd, but a user-chosen shared path is the user's choice.
+* State-directory and token checks use one no-follow file handle (no check-then-use window); the log is
+  rotated by rename (two generations), not stat-then-delete.
 
 * A same-user attacker is out of scope (see above). Token file read access equals daemon access.
 * The daemon receives the client's whole environment (needed for fingerprints and `PATH`), in memory

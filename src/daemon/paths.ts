@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { constants as fsc } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -108,13 +109,25 @@ export async function ensureSecureDir(dir: string): Promise<{ created: boolean; 
     created = false;
   }
   if (isWin) return { created, acl: created ? ((await restrictWindowsAcl(dir)) ? 'restricted' : 'inherited') : 'inherited' };
-  let st = await fs.lstat(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} is not a plain directory; refusing to use it`);
-  posixOwnerCheck(st, dir);
-  if ((st.mode & 0o077) !== 0) {
-    await fs.chmod(dir, 0o700);
-    st = await fs.lstat(dir);
-    if ((st.mode & 0o077) !== 0) throw new Error(`cannot restrict ${dir} to mode 0700`);
+  // Everything below goes through ONE directory handle opened without following symlinks, so the
+  // checks and the chmod apply to the very object that was checked (no check-then-use race).
+  let fh: import('node:fs/promises').FileHandle;
+  try {
+    fh = await fs.open(dir, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0) | (fsc.O_DIRECTORY ?? 0));
+  } catch (e) {
+    throw new Error(`${dir} is not a plain directory; refusing to use it (${(e as NodeJS.ErrnoException).code})`);
+  }
+  try {
+    let st = await fh.stat();
+    if (!st.isDirectory()) throw new Error(`${dir} is not a plain directory; refusing to use it`);
+    posixOwnerCheck(st, dir);
+    if ((st.mode & 0o077) !== 0) {
+      await fh.chmod(0o700);
+      st = await fh.stat();
+      if ((st.mode & 0o077) !== 0) throw new Error(`cannot restrict ${dir} to mode 0700`);
+    }
+  } finally {
+    await fh.close();
   }
   return { created, acl: 'n/a' };
 }
@@ -134,17 +147,28 @@ export async function checkSecureDir(dir: string): Promise<string | null> {
   }
 }
 
-export async function checkSecureFile(file: string): Promise<string | null> {
+/**
+ * Read a secret file through a single no-follow handle, verifying type, owner and mode on that same
+ * handle (no check-then-use race). Returns the text, 'absent', or { unsafe: reason }.
+ */
+export async function readSecureFile(file: string): Promise<string | 'absent' | { unsafe: string }> {
+  let fh: import('node:fs/promises').FileHandle;
   try {
-    const st = await fs.lstat(file);
-    if (!st.isFile()) return `${file} is not a regular file`;
-    if (!isWin) {
-      if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return `${file} is owned by another user`;
-      if ((st.mode & 0o077) !== 0) return `${file} is accessible by other users`;
-    }
-    return null;
+    fh = await fs.open(file, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0));
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : (e as Error).message;
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' ? 'absent' : { unsafe: `${file}: ${code}` };
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) return { unsafe: `${file} is not a regular file` };
+    if (!isWin) {
+      if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return { unsafe: `${file} is owned by another user` };
+      if ((st.mode & 0o077) !== 0) return { unsafe: `${file} is accessible by other users` };
+    }
+    return await fh.readFile('utf8');
+  } finally {
+    await fh.close();
   }
 }
 

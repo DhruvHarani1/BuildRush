@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
+import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { findProjectRoot } from '../config.js';
@@ -14,7 +15,7 @@ import {
 import {
   assertSocketPathFits, DaemonDirs, daemonDirs, DaemonMeta, ensureSecureDir, newPipeName, normalizeRoot, writeSecretFile,
 } from './paths.js';
-import { probeDaemon, removeEndpointFiles } from './client.js';
+import { acquireLock, probeDaemon, removeEndpointFiles } from './client.js';
 
 export class AlreadyRunningError extends Error {
   constructor(readonly meta: DaemonMeta) {
@@ -32,6 +33,8 @@ export interface ServerOptions {
   protoOverride?: number;
   /** How long a connection may take to deliver its first (authenticating) line. */
   authTimeoutMs?: number;
+  /** Test hook: extra files whose change retires the daemon (like package.json does). */
+  extraWatch?: string[];
 }
 
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -66,7 +69,9 @@ export class DaemonServer {
   private readonly startedAt = Date.now();
   private readonly proto: number;
   private readonly version: string;
-  private watchedSigs: [string, string][] = [];
+  private baseSig = '';
+  private staleCheckedAt = 0;
+  private logBytes = 0;
 
   private constructor(
     private readonly opts: ServerOptions,
@@ -87,7 +92,12 @@ export class DaemonServer {
     const dirs = daemonDirs(opts.root, opts.env);
     await ensureSecureDir(dirs.base);
     await ensureSecureDir(dirs.dir);
-    await DaemonServer.acquireStartLock(dirs);
+    const release = await acquireLock(dirs, {
+      onWait: async () => {
+        const live = await probeDaemon(dirs);
+        if (live.status === 'live') throw new AlreadyRunningError(live.meta);
+      },
+    });
     try {
       const live = await probeDaemon(dirs);
       if (live.status === 'live') throw new AlreadyRunningError(live.meta);
@@ -118,44 +128,44 @@ export class DaemonServer {
       }
       if (process.platform !== 'win32') await fs.chmod(endpoint, 0o600).catch(() => undefined);
 
-      await self.trimLog();
+      await fs.rename(dirs.log, `${dirs.log}.old`).catch(() => undefined); // bounded: at most two log generations
       await writeSecretFile(dirs.token, token);
       const meta: DaemonMeta = {
         proto: self.proto, version: self.version, pid: process.pid, root: opts.root, endpoint,
         startedAt: self.startedAt, node: process.version,
       };
       await writeFileAtomic(dirs.meta, JSON.stringify(meta), 0o600); // its presence means "ready"
-      self.watchedSigs = [
-        [process.execPath, await sig(process.execPath)],
-        [fileURLToPath(new URL('../cli.js', import.meta.url)), await sig(fileURLToPath(new URL('../cli.js', import.meta.url)))],
-        [fileURLToPath(new URL('../engine.js', import.meta.url)), await sig(fileURLToPath(new URL('../engine.js', import.meta.url)))],
-      ];
+      self.baseSig = await self.installSig();
       await self.log(`listening (pid ${process.pid}, proto ${self.proto}, version ${self.version})`);
       self.touch();
       return self;
     } finally {
-      await fs.rm(dirs.lock, { recursive: true, force: true });
+      await release();
     }
   }
 
-  private static async acquireStartLock(dirs: DaemonDirs): Promise<void> {
-    for (let i = 0; i < 100; i++) {
-      try {
-        await fs.mkdir(dirs.lock);
-        return;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+  /**
+   * Identity of everything this daemon was loaded from: the Node binary, package.json, the newest
+   * mtime and file count across dist/src (so a partial rebuild also counts), plus test-injected files.
+   */
+  private async installSig(): Promise<string> {
+    const srcDir = fileURLToPath(new URL('..', import.meta.url));
+    const parts = [process.execPath, fileURLToPath(new URL('../../../package.json', import.meta.url)), ...(this.opts.extraWatch ?? [])];
+    const sigs = await Promise.all(parts.map((f) => sig(f)));
+    let newest = 0;
+    let count = 0;
+    const walk = async (d: string): Promise<void> => {
+      for (const e of await fs.readdir(d, { withFileTypes: true }).catch(() => [])) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) await walk(p);
+        else {
+          count++;
+          newest = Math.max(newest, (await fs.stat(p).catch(() => null))?.mtimeMs ?? 0);
+        }
       }
-      const st = await fs.stat(dirs.lock).catch(() => null);
-      if (st && Date.now() - st.mtimeMs > 15_000) {
-        await fs.rm(dirs.lock, { recursive: true, force: true }); // its owner died mid-start
-        continue;
-      }
-      const live = await probeDaemon(dirs);
-      if (live.status === 'live') throw new AlreadyRunningError(live.meta);
-      await sleep(100);
-    }
-    throw new Error('timed out waiting for a concurrent daemon start');
+    };
+    await walk(srcDir);
+    return `${sigs.join('|')}|${count}:${newest}`;
   }
 
   // ---- lifecycle -------------------------------------------------------------------------------
@@ -185,15 +195,14 @@ export class DaemonServer {
   private async log(msg: string): Promise<void> {
     // Fixed event text only: never request contents, tokens, environments or paths from clients.
     try {
-      await fs.appendFile(this.dirs.log, `${new Date().toISOString()} ${msg}\n`, { mode: 0o600 });
+      const line = `${new Date().toISOString()} ${msg}\n`;
+      this.logBytes += line.length;
+      if (this.logBytes > MAX_LOG_BYTES) {
+        this.logBytes = line.length;
+        await fs.rename(this.dirs.log, `${this.dirs.log}.old`).catch(() => undefined);
+      }
+      await fs.appendFile(this.dirs.log, line, { mode: 0o600 });
     } catch { /* logging must never break the daemon */ }
-  }
-
-  private async trimLog(): Promise<void> {
-    try {
-      const st = await fs.stat(this.dirs.log);
-      if (st.size > MAX_LOG_BYTES) await fs.rm(this.dirs.log, { force: true });
-    } catch { /* absent */ }
   }
 
   // ---- connections -----------------------------------------------------------------------------
@@ -306,7 +315,14 @@ export class DaemonServer {
   }
 
   private async isStale(): Promise<boolean> {
-    for (const [file, was] of this.watchedSigs) if ((await sig(file)) !== was) return true;
+    // The stat walk runs at most once per second; a stale verdict is sticky.
+    if (this.staleCheckedAt === -1) return true;
+    if (Date.now() - this.staleCheckedAt < 1000) return false;
+    this.staleCheckedAt = Date.now();
+    if ((await this.installSig()) !== this.baseSig) {
+      this.staleCheckedAt = -1;
+      return true;
+    }
     return false;
   }
 
@@ -388,10 +404,29 @@ function parseCommon(a: Record<string, unknown>): Common | string {
       size += k.length + v.length;
       if (size > MAX_ENV_CHARS) return 'env is too large';
       if (k === '' || k === '__proto__' || k.includes('=') || k.includes('\0') || v.includes('\0')) continue;
+      if (k.toUpperCase() === 'BUILDRUSH_CACHE_DIR' && !path.isAbsolute(v)) {
+        // A relative path would resolve against the daemon's cwd, not the client's: split caches, wrong place.
+        return 'BUILDRUSH_CACHE_DIR must be absolute (the client resolves it before sending)';
+      }
       env[k] = v;
     }
   }
-  return { cwd: a.cwd, env };
+  return { cwd: a.cwd, env: process.platform === 'win32' ? caseInsensitiveEnv(env) : env };
+}
+
+/**
+ * Windows environment names are case-insensitive (`Path` is `PATH`) but a plain object is not.
+ * Reads resolve through a case-folded index; enumeration still yields the names as the client spelled them.
+ */
+export function caseInsensitiveEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const folded = new Map<string, string>();
+  for (const k of Object.keys(env)) folded.set(k.toUpperCase(), k);
+  const real = (p: string | symbol): string | symbol => (typeof p === 'string' ? (folded.get(p.toUpperCase()) ?? p) : p);
+  return new Proxy(env, {
+    get: (t, p) => Reflect.get(t, real(p)),
+    has: (t, p) => Reflect.has(t, real(p)),
+    set: (t, p, v) => { folded.set(String(p).toUpperCase(), String(p)); return Reflect.set(t, p, v); },
+  });
 }
 
 function parseRun(a: Record<string, unknown>): RunArgs | string {

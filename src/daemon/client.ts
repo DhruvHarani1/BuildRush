@@ -3,7 +3,8 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { checkSecureDir, checkSecureFile, DaemonDirs, DaemonMeta } from './paths.js';
+import { randomBytes } from 'node:crypto';
+import { checkSecureDir, DaemonDirs, DaemonMeta, readSecureFile, resolveBaseDir } from './paths.js';
 import { LineReader, MAX_MESSAGE_CHARS, Message, Op, PROTO, VERSION } from './protocol.js';
 
 export interface Credentials {
@@ -57,10 +58,10 @@ export async function readCredentials(dirs: DaemonDirs): Promise<Credentials | '
     return 'absent';
   }
   if (!isMeta(meta)) return 'absent';
-  const tokIssue = await checkSecureFile(dirs.token);
-  if (tokIssue === 'absent') return 'absent';
-  if (tokIssue) return { unsafe: tokIssue };
-  const token = (await fs.readFile(dirs.token, 'utf8')).trim();
+  const tokText = await readSecureFile(dirs.token);
+  if (tokText === 'absent') return 'absent';
+  if (typeof tokText !== 'string') return tokText;
+  const token = tokText.trim();
   if (token.length < 32) return { unsafe: 'token file is malformed' };
   return { meta, token };
 }
@@ -157,6 +158,66 @@ export async function removeEndpointFiles(dirs: DaemonDirs, onlyPid?: number): P
   if (process.platform !== 'win32') await fs.rm(dirs.socket, { force: true });
 }
 
+const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Take the per-project lifecycle lock (a directory holding an owner nonce). `onWait` runs while
+ * another holder has it (the daemon uses it to notice that a live daemon appeared). A lock older than
+ * 15 s is considered abandoned and is moved aside atomically (only one breaker wins). The returned
+ * release removes the lock only if it still carries OUR nonce, so a lock that was broken and re-taken
+ * is never released by its previous owner. Residual: breaking races the stat with the rename; the
+ * effect is limited to two starters briefly overlapping, which the atomic endpoint bind still serialises.
+ */
+export async function acquireLock(dirs: DaemonDirs, o: { timeoutMs?: number; onWait?: () => Promise<void> } = {}): Promise<() => Promise<void>> {
+  const nonce = `${randomBytes(8).toString('hex')}:${Date.now()}`;
+  const deadline = Date.now() + (o.timeoutMs ?? 10_000);
+  let missingSince: number | null = null;
+  while (Date.now() < deadline) {
+    try {
+      await fs.mkdir(dirs.lock);
+      await fs.writeFile(`${dirs.lock}/owner`, nonce);
+      return async () => {
+        const cur = await fs.readFile(`${dirs.lock}/owner`, 'utf8').catch(() => null);
+        if (cur === nonce) await fs.rm(dirs.lock, { recursive: true, force: true });
+      };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    }
+    const owner = await fs.readFile(`${dirs.lock}/owner`, 'utf8').catch(() => null);
+    if (owner === null) missingSince ??= Date.now();
+    else missingSince = null;
+    // A lock whose owner file never appeared (holder died between mkdir and write) ages from first sight.
+    const ts = owner ? Number(owner.split(':')[1]) : (missingSince ?? NaN);
+    if (Number.isFinite(ts) && Date.now() - ts > 15_000) {
+      const aside = `${dirs.lock}.dead-${randomBytes(4).toString('hex')}`;
+      try {
+        await fs.rename(dirs.lock, aside); // atomic: exactly one breaker succeeds
+        await fs.rm(aside, { recursive: true, force: true });
+      } catch { /* someone else broke it first */ }
+      continue;
+    }
+    await o.onWait?.();
+    await sleepMs(100);
+  }
+  throw new Error('timed out waiting for the daemon lifecycle lock');
+}
+
+/** Remove a crashed daemon's files, under the lifecycle lock and only if it is still stale. */
+export async function cleanupStale(dirs: DaemonDirs): Promise<void> {
+  let release: (() => Promise<void>) | null = null;
+  try {
+    release = await acquireLock(dirs, { timeoutMs: 3000 });
+  } catch {
+    return; // someone is starting a daemon: leave everything alone
+  }
+  try {
+    const p = await probeDaemon(dirs, { timeoutMs: 1000 });
+    if (p.status === 'stale') await removeEndpointFiles(dirs, p.meta.pid);
+  } finally {
+    await release();
+  }
+}
+
 export const defaultEntry = (): string => fileURLToPath(new URL('../../../bin/buildrush.js', import.meta.url));
 
 export interface StartOptions {
@@ -170,6 +231,8 @@ export interface StartOptions {
 export async function spawnDaemon(root: string, dirs: DaemonDirs, o: StartOptions = {}): Promise<Probe> {
   const env = { ...(o.env ?? process.env) };
   if (o.idleMs !== undefined) env.BUILDRUSH_DAEMON_IDLE_MS = String(o.idleMs);
+  // The daemon runs with a different cwd: hand it the base directory this process resolved, never a relative one.
+  if (env.BUILDRUSH_DAEMON_DIR) env.BUILDRUSH_DAEMON_DIR = resolveBaseDir(env);
   const child = spawn(process.execPath, [o.entry ?? defaultEntry(), 'daemon', '__serve', '--root', root], {
     // cwd is not the project: a daemon must never pin the project directory (Windows cannot delete it then).
     detached: true, stdio: 'ignore', windowsHide: true, env, cwd: os.tmpdir(),

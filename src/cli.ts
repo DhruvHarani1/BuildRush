@@ -324,7 +324,11 @@ async function cmdRun(names: string[], f: Flags, signal: AbortSignal): Promise<n
       },
     );
     if (via.ok) remote = via.data;
-    else if (f.verbose || via.reason.includes('mid-run')) console.error(`buildrush: daemon unavailable (${via.reason}); running in-process`);
+    else if (via.midRun) {
+      // Not re-run silently: tasks may already have executed. The cache makes an explicit re-run cheap.
+      console.error(`buildrush: the daemon failed mid-run (${via.reason}); some tasks may have executed. Re-run with --no-daemon.`);
+      return EXIT.INTERNAL;
+    } else if (f.verbose) console.error(`buildrush: daemon unavailable (${via.reason}); running in-process`);
   }
   const runLocal = async (): Promise<RunReport> => {
     const p = await open(f);
