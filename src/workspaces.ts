@@ -452,7 +452,8 @@ export function entryCandidates(pkg: WorkspacePackage, sub: string): { declared:
           const cap = subpath.slice(star, subpath.length - (key.length - star - 1));
           const hits: string[] = [];
           leaves(val, hits);
-          declared.push(...hits.map((h) => h.replace('*', cap)));
+          // Node's package exports replace EVERY "*" in the target with the captured subpath.
+          declared.push(...hits.map((h) => h.split('*').join(cap)));
         }
       }
     }
