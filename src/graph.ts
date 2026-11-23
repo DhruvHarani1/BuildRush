@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { compileGlobs } from './util/glob.js';
 import { mapLimit } from './util/hash.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
+import { entryCandidates, type Workspace, type WorkspacePackage } from './workspaces.js';
 
 export type EdgeKind = 'import' | 'dynamic-import' | 'require' | 'package';
 
@@ -132,18 +133,23 @@ export class DepGraph {
   rdeps = new Map<string, Map<string, EdgeKind>>();
   externals = new Map<string, Set<string>>();
   workspacePackages = new Map<string, string>(); // name -> dir (rel)
+  /** Set when the project is a declared workspace: package.json entry points drive import resolution. */
+  private wsPackages = new Map<string, WorkspacePackage>();
+  /** Declared workspace: a package.json change is scoped to its package instead of being global. */
+  private scopedManifests = false;
 
   static async build(
     root: string,
     files: ReadonlyMap<string, { digest: string }>,
-    opts: { testPatterns: string[]; cachePath?: string },
+    opts: { testPatterns: string[]; cachePath?: string; workspace?: Workspace | null },
   ): Promise<DepGraph> {
     const g = new DepGraph();
     const isTest = compileGlobs(opts.testPatterns);
     const codeFiles = [...files.keys()].filter((f) => CODE_EXT.includes(path.extname(f)));
     const known = new Set(files.keys());
 
-    await g.loadWorkspaces(root, files.keys());
+    if (opts.workspace) g.useWorkspace(opts.workspace);
+    else await g.loadWorkspaces(root, files.keys());
     const ts = await loadTsPaths(root);
 
     // Scanning is cached by content digest so unchanged files are never re-read.
@@ -174,6 +180,10 @@ export class DepGraph {
             g.modules.set(r.path, { path: r.path, uncertain: [], isTest: false, pkg: g.packageOf(r.path) });
           }
           g.addEdge(f, r.path, r.viaPackage ? 'package' : kind);
+          for (const extra of r.also ?? []) {
+            if (!g.modules.has(extra)) g.modules.set(extra, { path: extra, uncertain: [], isTest: false, pkg: g.packageOf(extra) });
+            g.addEdge(f, extra, 'package');
+          }
         } else if (r.type === 'external') {
           if (!g.externals.has(f)) g.externals.set(f, new Set());
           g.externals.get(f)!.add(r.name);
@@ -204,6 +214,31 @@ export class DepGraph {
     return best;
   }
 
+  private useWorkspace(ws: Workspace) {
+    this.scopedManifests = true;
+    for (const p of ws.packages) {
+      this.workspacePackages.set(p.name, p.dir);
+      this.wsPackages.set(p.name, p);
+    }
+  }
+
+  /** Package-level edges observed in the module graph: importing package -> imported package. */
+  packageEdges(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    for (const [from, tos] of this.deps) {
+      const a = this.modules.get(from)?.pkg;
+      if (!a) continue;
+      for (const to of tos.keys()) {
+        const b = this.modules.get(to)?.pkg;
+        if (b && b !== a) {
+          if (!out.has(a)) out.set(a, new Set());
+          out.get(a)!.add(b);
+        }
+      }
+    }
+    return out;
+  }
+
   private async loadWorkspaces(root: string, files: Iterable<string>) {
     for (const f of files) {
       if (path.posix.basename(f) !== 'package.json') continue;
@@ -220,7 +255,7 @@ export class DepGraph {
     spec: string,
     known: Set<string>,
     ts: PathsConfig,
-  ): { type: 'internal'; path: string; viaPackage?: boolean } | { type: 'external'; name: string } | { type: 'unresolved' } {
+  ): { type: 'internal'; path: string; viaPackage?: boolean; also?: string[] } | { type: 'external'; name: string } | { type: 'unresolved' } {
     if (spec.startsWith('node:')) return { type: 'external', name: spec };
     if (spec.startsWith('./') || spec.startsWith('../') || spec === '.' || spec === '..') {
       const base = path.posix.normalize(path.posix.join(path.posix.dirname(from), spec));
@@ -236,6 +271,29 @@ export class DepGraph {
     if (viaPaths) return { type: 'internal', path: viaPaths };
     const name = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]!;
     const wsDir = this.workspacePackages.get(name);
+    const wsPkg = this.wsPackages.get(name);
+    if (wsPkg) {
+      // Declared workspace package: follow package.json exports/main (mapped from build output to
+      // sources). Every declared target that exists is an edge (over-approximation is safe).
+      const { declared, fallback } = entryCandidates(wsPkg, spec.slice(name.length + 1));
+      const hits = new Set<string>();
+      for (const c of declared) {
+        const hit = tryFile(path.posix.join(wsPkg.dir, c), known);
+        if (hit) hits.add(hit);
+      }
+      if (hits.size === 0) {
+        for (const c of fallback) {
+          const hit = tryFile(path.posix.join(wsPkg.dir, c), known);
+          if (hit) {
+            hits.add(hit);
+            break;
+          }
+        }
+      }
+      if (hits.size === 0) return { type: 'unresolved' };
+      const [first, ...rest] = [...hits];
+      return { type: 'internal', path: first!, viaPackage: true, also: rest };
+    }
     if (wsDir !== undefined && wsDir !== '.') {
       const sub = spec.slice(name.length + 1);
       const candidates = sub
@@ -257,9 +315,19 @@ export class DepGraph {
     let conservative: string | null = null;
     const isGlobalConfig = compileGlobs(GLOBAL_CONFIG);
     for (const c of changed) {
-      if (!conservative && isGlobalConfig(c)) conservative = `global configuration changed: ${c}`;
+      const scoped = this.scopedManifest(c);
+      if (!conservative && isGlobalConfig(c) && !scoped) conservative = `global configuration changed: ${c}`;
       reached.set(c, null);
       queue.push(c);
+      // A workspace package's own package.json can alter any of its modules, but nothing else directly.
+      if (scoped) {
+        for (const m of this.modules.values()) {
+          if (m.pkg === scoped && !reached.has(m.path)) {
+            reached.set(m.path, c);
+            queue.push(m.path);
+          }
+        }
+      }
     }
     for (let i = 0; i < queue.length; i++) {
       const cur = queue[i]!;
@@ -284,6 +352,13 @@ export class DepGraph {
       }
     }
     return { reached, conservative };
+  }
+
+  private scopedManifest(file: string): string | null {
+    if (!this.scopedManifests || path.posix.basename(file) !== 'package.json') return null;
+    const dir = path.posix.dirname(file);
+    for (const [name, d] of this.workspacePackages) if (d === dir && dir !== '.') return name;
+    return null;
   }
 
   chain(reached: Map<string, string | null>, node: string): string[] {

@@ -6,6 +6,7 @@ cli.ts ──► Project (config + FileIndex + Cache + graph)
               ├─ config.ts     strict schema, shell-free command tokenizer
               ├─ fsindex.ts    SHA-256 content index; metadata only as a racy-safe hint
               ├─ graph.ts      import graph, tsconfig paths, workspaces, impact + chains
+              ├─ workspaces.ts workspace detection, per-package task expansion, package impact
               ├─ affected.ts   git changes ► test selection (conservative on doubt)
               ├─ cache.ts      CAS blobs + action records, verify/gc/restore
               ├─ scheduler.ts  bounded DAG scheduler (critical path, cancel, fail-skip)
@@ -26,6 +27,28 @@ last-run report, per-task last-good components, duration history, stats).
 3. Cache lookup: validate record shape and every path; verify all blobs; restore atomically ► `cached`.
 4. Otherwise explain the miss (diff against the last successful components), spawn the command.
 5. On exit 0: capture declared outputs (refusing symlinks / empty matches), rescan inputs, and only if unchanged commit blobs then the action record (record last, so a crash never leaves a record pointing at missing blobs).
+
+## Workspaces
+
+`Project.open` runs `discoverWorkspaces` (package.json `workspaces`,
+`pnpm-workspace.yaml`, or `workspaces` globs in buildrush.json) and then
+`expandWorkspaceTasks`, which replaces every `scope: "packages"` task template
+in `config.tasks` with one ordinary task per package (`<pkg>:<task>`, `cwd` =
+package dir, `dependsOn` resolved through the package graph). After adapters have
+filled in commands/inputs/outputs, `finalizePackageTasks` makes globs
+project-relative and adds the implicit inputs. From that point the engine,
+scheduler and cache see plain tasks: the per-package behaviour (separate
+fingerprints, dependency fingerprints as components, per-instance outputs) is
+the existing task machinery, not a second code path. `Project.taskGroups` maps a
+template name to its instance ids so `run build` and pipelines fan out.
+
+`graph.ts` receives the workspace so imports of package names follow
+`package.json` entry points onto sources, modules carry their package, and a
+package-level `package.json` change is scoped to its package. `--affected` first
+selects packages (`selectPackages`: changed files, reached modules, reverse
+package edges from manifests and observed imports), schedules only those
+packages' tasks (dependencies come in through `closure()`), and filters test
+selection per package.
 
 ## Watch mode (`--watch`)
 

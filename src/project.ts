@@ -7,6 +7,7 @@ import { FileIndex } from './fsindex.js';
 import { DepGraph, SerializedGraph } from './graph.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
 import { compileGlobs } from './util/glob.js';
+import { discoverWorkspaces, expandWorkspaceTasks, finalizePackageTasks, Workspace } from './workspaces.js';
 
 export class Project {
   readonly stateDir: string;
@@ -17,6 +18,10 @@ export class Project {
     readonly config: Config,
     readonly index: FileIndex,
     readonly cache: Cache,
+    /** Detected workspace (monorepo), or null. */
+    readonly workspace: Workspace | null = null,
+    /** Package-task template name -> its per-package instance ids. */
+    readonly taskGroups: Record<string, string[]> = {},
   ) {
     this.stateDir = path.join(root, '.buildrush', 'state');
   }
@@ -26,6 +31,8 @@ export class Project {
     if (!found) throw new Error(`no buildrush.json found in ${start} or any parent directory (run \`buildrush init\`)`);
     const root = await fs.realpath(found);
     const config = await loadConfig(root);
+    const workspace = await discoverWorkspaces(root, config.workspaces);
+    const taskGroups = expandWorkspaceTasks(config, workspace);
     for (const t of Object.values(config.tasks)) {
       if (!t.adapter) continue;
       const cwd = t.cwd === '.' ? root : path.join(root, t.cwd);
@@ -51,6 +58,7 @@ export class Project {
         }
       }
     }
+    finalizePackageTasks(config);
     const stateDir = path.join(root, '.buildrush', 'state');
     const cacheDir = process.env.BUILDRUSH_CACHE_DIR
       ? path.resolve(process.env.BUILDRUSH_CACHE_DIR)
@@ -61,7 +69,7 @@ export class Project {
     const cache = new Cache(cacheDir);
     await cache.init();
     await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
-    const p = new Project(root, config, index, cache);
+    const p = new Project(root, config, index, cache, workspace, taskGroups);
     if (opts.scan !== false) {
       await index.load();
       await index.scan();
@@ -82,6 +90,7 @@ export class Project {
     this.graphCache = await DepGraph.build(this.root, files, {
       testPatterns: this.config.tests.patterns,
       cachePath: path.join(this.stateDir, 'scan-cache.json'),
+      workspace: this.workspace,
     });
     return this.graphCache;
   }

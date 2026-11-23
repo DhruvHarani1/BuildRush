@@ -10,16 +10,16 @@ shipped unless tests exercise it.
 | M3 Persistent CAS cache + explanations | ✅ | verify/repair/gc, corruption + traversal + symlink tests |
 | M4 Vite adapter + baseline benchmarks | ✅ | `vite`/`tsc`/`eslint` adapters (hidden-input handling, outDir discovery, VITE_* env); benchmark suite with parallel-native baseline, correctness gate, median/p95. Still missing: memory/CPU sampling, real-monorepo and slow-install workloads |
 | M5 Vitest adapter | 🟡 | adapter + `--affected` selection shipped and benchmarked; opt-in per-test-file result caching (`testCache`, tested with node-script runners, not yet benchmarked with real vitest); missing: coverage-informed and risk-based modes, sharding, flaky-test policy, duration history |
-| M6 Watch mode + daemon | 🟡 | **Done and tested:** `run/build/test/check --watch` (+ `--json` NDJSON): `fs.watch` (native recursive on Windows/macOS, per-directory watchers on Linux that skip ignored trees), leading+trailing debounce, content-digest reconciliation (periodic, and forced after watcher errors), task-output/ignored-dir filtering, cancellation of obsolete runs (never cached), config/package.json reload, graceful shutdown. **Not done:** daemon + authenticated local IPC, cross-invocation warm state, inotify-limit handling beyond falling back to polling reconciliation, watch-mode benchmarks, Linux/macOS CI runs of the watch tests (only exercised on Windows so far) |
+| M6 Watch mode + daemon | 🟡 | **Done and tested:** `run/build/test/check --watch` (+ `--json` NDJSON): `fs.watch` (native recursive on Windows/macOS, per-directory watchers on Linux that skip ignored trees), leading+trailing debounce, content-digest reconciliation (periodic, and forced after watcher errors), task-output/ignored-dir filtering, cancellation of obsolete runs (never cached), config/package.json reload, graceful shutdown. **Not done:** daemon + authenticated local IPC, cross-invocation warm state, inotify-limit handling beyond falling back to polling reconciliation, watch-mode benchmarks (watch tests run in CI on Linux, macOS and Windows) |
 | M7 Hardening & release | 🟡 | security docs, CI, CodeQL, Scorecard, provenance release written; macOS test matrix (Windows added to CI; local suite passes), fuzzing of the import scanner, npm/Docker publication still to do |
-| Workspaces | ⬜ | per-package task expansion (`build` in every package, ordered by package deps) |
+| Workspaces | 🟡 | npm/yarn/bun/pnpm detection, per-package task expansion with `^` ordering, package-aware module graph and `--affected` implemented and tested on a script-based fixture. Not done: validation against real-world monorepos, `--filter`, package-manager-aware task defaults, partial restore of a package's outputs, benchmarks |
 | Property-based + fuzz tests | ✅ | seeded property/fuzz tests for glob matcher (reference-equivalence, linear-time), path validation, cache keys, import scanner |
 | Remote cache | ⬜ | opt-in only. Prereqs: signed manifests, tenant isolation, TLS auth, retention policy (ADR first) |
 | More ecosystems | ⬜ | Python, Go, Rust adapters only after JS/TS is solid |
 
 ## Near-term performance ideas (measure first)
 
-1. Per-package task splitting for workspaces (biggest real-world win).
+1. Per-package task splitting for workspaces is implemented (see Workspaces row); measure it on real monorepos before claiming a win.
 2. Parallel/streaming blob restore and hardlink/reflink restore where safe.
 3. Persisting the module graph incrementally instead of rebuilding it.
 4. Tool-native incremental modes (`tsc --incremental`) with their state dirs as declared outputs.

@@ -22,6 +22,7 @@ npx buildrush test --affected         # only tests that (transitively) import wh
 npx buildrush test --watch            # stay running; re-run only what each file change affects (also run/build/check)
 npx buildrush run --watch --json      # one JSON object per cycle (NDJSON) for editors and scripts
 npx buildrush explain src/Button.tsx  # tasks, modules and tests this file affects, with import chains
+npx buildrush run build --affected    # monorepos: only changed packages and their dependents
 ```
 
 ```
@@ -30,6 +31,16 @@ npx buildrush explain src/Button.tsx  # tasks, modules and tests this file affec
 [ran]       test             3.91s  why: dependency task "build" has a different fingerprint
 BuildRush succeeded: 2 ran, 1 cached, 0 failed, 0 skipped in 6.0s
 ```
+
+## Monorepos
+
+npm/yarn/bun (`workspaces`) and pnpm (`pnpm-workspace.yaml`) workspaces are
+detected. Define a task once with `"scope": "packages"` and it runs in every
+package (`@acme/core:build`, ...), ordered by the package dependency graph with
+`"dependsOn": ["^build"]`, each with its own fingerprint and cache entry; a change
+in one package re-runs its dependents and nothing else. `analyze` and `graph
+--packages` show the packages and their edges. See
+[docs/configuration.md](docs/configuration.md#workspaces-monorepos).
 
 ## Why trust the cache
 

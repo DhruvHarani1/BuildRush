@@ -30,7 +30,8 @@ Unknown keys are errors, not silently ignored. Run `buildrush config validate`.
       "testCache": false                // test tasks only, opt-in: skip individual test files unchanged since a passing run (see below)
     }
   },
-  "pipelines": { "default": ["typecheck", "build"] }
+  "pipelines": { "default": ["typecheck", "build"] },
+  "workspaces": null                    // null/omitted = auto-detect; false = off; ["packages/*", "!packages/legacy"] = explicit globs
 }
 ```
 
@@ -39,16 +40,90 @@ Unknown keys are errors, not silently ignored. Run `buildrush config validate`.
 Globs: `**`, `*`, `?`, `{a,b}`; a trailing `/` means "everything beneath".
 Patterns must be project-relative and may not contain `..`.
 
+## Workspaces (monorepos)
+
+BuildRush detects npm, yarn and bun workspaces (`workspaces` array or
+`{ "packages": [...] }` in the root `package.json`) and pnpm workspaces
+(`pnpm-workspace.yaml`, simple `packages:` list: block or single-line flow
+style, quotes, comments and `!negation`; anchors and multi-line flow lists are
+not parsed, use the `workspaces` key above for those). Package globs are
+resolved to directories with a `package.json` that has a `name`; the root is not
+a package, `node_modules` and symlinks are never followed, duplicate names are
+an error. Each package records its name, version and which other workspace
+packages it depends on (`dependencies`, `devDependencies`,
+`optionalDependencies`; any declared range counts, `workspace:*` or not;
+`peerDependencies` are not ordering edges).
+
+A task with `"scope": "packages"` is a **template**: it is expanded into one
+task per package, named `<package>:<task>` (e.g. `@acme/core:build`).
+
+```jsonc
+"tasks": {
+  "build": {
+    "scope": "packages",
+    "packages": ["@acme/*"],            // optional: package-name globs; default every package
+    "command": "tsc -p .",              // runs with the package directory as cwd
+    "inputs": ["src/**", "tsconfig.json"],   // relative to the package
+    "outputs": ["dist/**"],             // relative to the package
+    "dependsOn": ["^build"]             // "^build": build of this package's workspace dependencies
+  },
+  "test": { "scope": "packages", "kind": "test", "adapter": "vitest", "dependsOn": ["build"] }  // "build": this package's build
+},
+"pipelines": { "default": ["build", "test"] }
+```
+
+* `buildrush run build` runs every instance; `buildrush run @acme/core:build` runs one (plus what it depends on). Pipelines and root tasks may name a template and get all its instances.
+* `dependsOn` in a package task: `"x"` = the same package's `x` (if `x` is a package task; error if the `packages` filter excludes it there) or the root task `x`; `"^x"` = `x` in each workspace dependency, skipping through dependency packages that do not run `x` so ordering still follows the package graph. `^` is only valid between package tasks. A package dependency cycle is a config error naming the cycle (`workspace package dependency cycle: a -> b -> a`) whenever a `^` dependency is used.
+* `cwd` is not allowed on package tasks (every instance runs in its package directory). `inputs`/`outputs` globs are package-relative and cannot contain `..`.
+* Everything else (`env`, `cache`, `kind`, `cpu`, `adapter`, ...) applies per instance, and each instance has its own fingerprint, cache entry and outputs.
+* A package task with `scope: "packages"` and no workspace is an error.
+
+**What a package task's fingerprint covers.** Its command, env, toolchain,
+fingerprints of its `dependsOn` instances (so a change in package B invalidates
+everything downstream that depends on B's task), and its input files:
+
+| `inputs` | Files hashed |
+| --- | --- |
+| declared | those globs in the package, the package's `package.json`, and the root-shared files |
+| omitted (no adapter) | the whole package, **all transitive workspace dependency packages' directories**, and the root-shared files |
+| omitted (adapter) | the adapter's inputs for the package, the dependency packages' directories, and the root-shared files; if the adapter cannot bound its inputs the whole project is hashed |
+
+Root-shared files: root `package.json`, every lockfile (`package-lock.json`,
+`npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock[b]`),
+`pnpm-workspace.yaml`, `.npmrc`, `.yarnrc[.yml]`, `.nvmrc`, `.node-version` and
+root `tsconfig*.json`. Changing any of them invalidates **every** package task.
+Another task's outputs are still never inputs unless depended on.
+
+**`--affected` in a workspace.** Selected packages = packages containing changed
+files, packages whose modules (transitively) import changed code, and every
+package that depends on those through `package.json` dependencies or imports
+observed in the module graph. Only those packages' tasks are scheduled; tasks of
+unaffected packages that a selected task depends on (`^build`) are still pulled
+in and normally come from the cache. Test tasks additionally receive only the
+selected test files located in their own package. Everything is selected
+(reason reported) when a root-shared file, `buildrush.json` or global config
+changes, when git cannot be queried, or when a changed module has uncertain
+dependencies. A change to a package's own `package.json` is scoped to that
+package and its dependents instead of selecting everything.
+
+**Imports of workspace packages** (`import "@acme/core"`) resolve into the
+package's sources: every file named by `exports` (conditions and `*` subpath
+patterns), `main`, `module`, `types` that exists, with build-output directories
+(`dist/`, `lib/`, `build/`, `out/`, ...) also mapped to `src/` and `.js`
+mapped to `.ts`; failing that `src/index`, `index`, `lib/index`. An import of a
+workspace package that cannot be resolved is recorded as uncertain and handled
+conservatively (see rules below).
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `buildrush init [--force]` | Generate a starter config from detected tools (fails if nothing is detected) |
-| `buildrush analyze [--json]` | Project summary, module graph stats, cycles, uncertain modules |
-| `buildrush graph [--dot]` | Module dependency graph |
+| `buildrush analyze [--json]` | Project summary, module graph stats, cycles, uncertain modules; workspace packages and their edges |
+| `buildrush graph [--dot\|--packages]` | Module dependency graph; in a workspace also packages (`--packages`: package graph only, declared and import edges) |
 | `buildrush run [task\|pipeline...]` | Run with caching (default pipeline `default`) |
 | `buildrush build\|test\|check` | Run the task/pipeline with that name |
-| `--affected [--since <ref>]` | Select tests affected by changes vs a git ref (default `HEAD`, includes untracked) |
+| `--affected [--since <ref>]` | Select tests affected by changes vs a git ref (default `HEAD`, includes untracked); in a workspace also selects packages |
 | `--no-cache`, `--bail`, `--concurrency n` | Execution controls |
 | `buildrush explain [task\|file]` | Why things ran; what a file change affects, with import chains |
 | `buildrush cache stats\|verify [--repair]\|clean` | Cache management |

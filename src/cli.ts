@@ -22,7 +22,7 @@ Usage: buildrush <command> [options]
 Commands:
   init                     Create ${CONFIG_FILE} from the detected project
   analyze                  Summarise the project, tasks and module graph
-  graph [--dot]            Print the module dependency graph (JSON, or Graphviz with --dot)
+  graph [--dot|--packages] Print the module dependency graph (JSON, or Graphviz with --dot); --packages: workspace package graph only
   run [task|pipeline...]   Run tasks (default pipeline "default") with caching
   build | test | check     Shortcuts for the task or pipeline of that name
   explain [task|file]      Why tasks ran or were reused; what a file change affects
@@ -32,7 +32,8 @@ Commands:
 
 Options:
   --watch                  Keep running; re-run affected work on every file change (run/build/test/check)
-  --affected               Run only tests affected by changes (test tasks; falls back to all tests when unsure)
+  --affected               Run only tests affected by changes (test tasks; falls back to all tests when unsure).
+                           In a workspace, also only the tasks of affected packages (changed + dependents)
   --since <git-ref>        Baseline for --affected (default HEAD)
   --no-cache               Execute everything; do not read or write the cache
   --bail                   Cancel remaining work after the first failure
@@ -49,6 +50,7 @@ Exit codes: 0 success, 1 task failure, 2 usage/config error, 3 internal error, 1
 interface Flags {
   json: boolean; verbose: boolean; quiet: boolean; affected: boolean; noCache: boolean; bail: boolean;
   force: boolean; repair: boolean; dot: boolean; help: boolean; version: boolean; watch: boolean;
+  packages: boolean;
   since?: string; concurrency?: number; root?: string;
 }
 
@@ -56,6 +58,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
   const flags: Flags = {
     json: false, verbose: false, quiet: false, affected: false, noCache: false, bail: false,
     force: false, repair: false, dot: false, help: false, version: false, watch: false,
+    packages: false,
   };
   const positional: string[] = [];
   const need = (i: number, name: string): string => {
@@ -76,6 +79,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
       case '--force': flags.force = true; break;
       case '--repair': flags.repair = true; break;
       case '--dot': flags.dot = true; break;
+      case '--packages': flags.packages = true; break;
       case '--help': case '-h': flags.help = true; break;
       case '--version': flags.version = true; break;
       case '--since': flags.since = need(i++, a); break;
@@ -221,6 +225,7 @@ async function cmdAnalyze(f: Flags): Promise<number> {
     packageManager: det.packageManager,
     tools: det.tools,
     workspacePackages: Object.fromEntries(g.workspacePackages),
+    workspace: p.workspace ? { ...p.workspace.summary(), importEdges: Object.fromEntries(packageImportEdges(g)), cycle: p.workspace.findCycle() } : null,
     files: p.index.files.size,
     modules: g.modules.size,
     edges,
@@ -235,7 +240,14 @@ async function cmdAnalyze(f: Flags): Promise<number> {
   console.log(`  package manager : ${det.packageManager ?? 'none detected'}${det.lockfiles.length > 1 ? `  (WARNING: multiple lockfiles: ${det.lockfiles.join(', ')})` : ''}`);
   console.log(`  tools           : ${det.tools.join(', ') || 'none detected'}`);
   console.log(`  files indexed   : ${result.files}   modules: ${result.modules}   import edges: ${edges}   tests: ${result.tests}`);
-  if (g.workspacePackages.size > 1) console.log(`  workspace pkgs  : ${[...g.workspacePackages.keys()].join(', ')}`);
+  if (p.workspace) {
+    const ws = p.workspace;
+    console.log(`  workspace       : ${ws.manager} (${ws.source}), ${ws.packages.length} package(s)`);
+    for (const k of ws.packages) console.log(`    - ${k.name}@${k.version ?? '?'}  ${k.dir}${k.workspaceDeps.length ? `  -> ${k.workspaceDeps.join(', ')}` : ''}`);
+    const cyc = ws.findCycle();
+    if (cyc) console.log(`    WARNING package dependency cycle: ${cyc.join(' -> ')}`);
+    for (const w of ws.warnings) console.log(`    warning: ${w}`);
+  } else if (g.workspacePackages.size > 1) console.log(`  workspace pkgs  : ${[...g.workspacePackages.keys()].join(', ')}`);
   console.log(`  tasks           : ${Object.keys(p.config.tasks).join(', ')}`);
   console.log(`  import cycles   : ${cycles.length}`);
   for (const c of cycles.slice(0, 5)) console.log(`    - ${c.join(' <-> ')}`);
@@ -245,15 +257,36 @@ async function cmdAnalyze(f: Flags): Promise<number> {
   return EXIT.OK;
 }
 
+/** Package -> packages it imports from, as observed in the module graph (sorted, for display). */
+function packageImportEdges(g: import('./graph.js').DepGraph): Map<string, string[]> {
+  return new Map([...g.packageEdges()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, [...v].sort()]));
+}
+
 async function cmdGraph(f: Flags): Promise<number> {
   const p = await open(f);
   const g = await p.graph();
+  if (f.packages) {
+    if (!p.workspace) throw new UsageError('--packages needs a workspace (none detected; see docs/configuration.md)');
+    const ws = p.workspace;
+    const edges = ws.packages.flatMap((k) => k.workspaceDeps.map((d) => ({ from: k.name, to: d, via: 'package.json' })));
+    for (const [from, tos] of packageImportEdges(g)) for (const to of tos) if (!edges.some((e) => e.from === from && e.to === to)) edges.push({ from, to, via: 'import' });
+    if (f.dot) {
+      console.log(['digraph packages {', '  rankdir=LR;', ...edges.map((e) => `  ${JSON.stringify(e.from)} -> ${JSON.stringify(e.to)} [label=${JSON.stringify(e.via)}];`), '}'].join('\n'));
+    } else printJson({ packages: ws.summary().packages, edges });
+    return EXIT.OK;
+  }
   if (f.dot) {
     const lines = ['digraph buildrush {', '  rankdir=LR;'];
+    if (p.workspace) {
+      p.workspace.packages.forEach((k, i) => {
+        const members = [...g.modules.values()].filter((m) => m.pkg === k.name).map((m) => `    ${JSON.stringify(m.path)};`);
+        lines.push(`  subgraph ${JSON.stringify(`cluster_${i}`)} {`, `    label=${JSON.stringify(k.name)};`, ...members, '  }');
+      });
+    }
     for (const [from, m] of g.deps) for (const [to, kind] of m) lines.push(`  ${JSON.stringify(from)} -> ${JSON.stringify(to)} [label=${JSON.stringify(kind)}];`);
     lines.push('}');
     console.log(lines.join('\n'));
-  } else printJson(g.serialize());
+  } else printJson(p.workspace ? { ...g.serialize(), workspace: p.workspace.summary() } : g.serialize());
   return EXIT.OK;
 }
 
@@ -276,8 +309,8 @@ function line(r: TaskReport, verbose: boolean): string {
 async function cmdRun(names: string[], f: Flags, signal: AbortSignal): Promise<number> {
   const p = await open(f);
   for (const n of names) {
-    if (!p.config.tasks[n] && !p.config.pipelines[n]) {
-      throw new Error(`unknown task ${JSON.stringify(n)} (tasks: ${Object.keys(p.config.tasks).join(', ')}; pipelines: ${Object.keys(p.config.pipelines).join(', ') || 'none'})`);
+    if (!p.config.tasks[n] && !p.config.pipelines[n] && !p.taskGroups[n]) {
+      throw new Error(`unknown task ${JSON.stringify(n)} (tasks: ${Object.keys(p.config.tasks).join(', ')}; pipelines: ${Object.keys(p.config.pipelines).join(', ') || 'none'}${Object.keys(p.taskGroups).length ? `; per-package tasks: ${Object.keys(p.taskGroups).join(', ')}` : ''})`);
     }
   }
   if (!f.json && !f.quiet) console.log(dim(`BuildRush ${VERSION} · ${p.config.project.name} · ${closure(p, expandNames(p, names)).length} task(s)`));
@@ -298,13 +331,17 @@ async function cmdRun(names: string[], f: Flags, signal: AbortSignal): Promise<n
   });
   await writeFileAtomic(
     path.join(p.stateDir, 'last-run.json'),
-    JSON.stringify({ at: Date.now(), requested: names, tasks: report.tasks.map((t) => ({ ...t, log: undefined })), selection: report.selection }),
+    JSON.stringify({ at: Date.now(), requested: names, tasks: report.tasks.map((t) => ({ ...t, log: undefined })), selection: report.selection, packages: report.packages ?? null }),
   );
   const count = (s: string) => report.tasks.filter((t) => t.state === s).length;
   const saved = report.tasks.reduce((n, t) => n + t.savedMsEstimate, 0);
   if (f.json) {
-    printJson({ ok: report.ok, cancelled: report.cancelled, durationMs: report.durationMs, selection: report.selection, tasks: report.tasks.map((t) => ({ ...t, log: f.verbose ? t.log : undefined })) });
+    printJson({ ok: report.ok, cancelled: report.cancelled, durationMs: report.durationMs, selection: report.selection, packages: report.packages ?? null, tasks: report.tasks.map((t) => ({ ...t, log: f.verbose ? t.log : undefined })) });
   } else if (!f.quiet || !report.ok) {
+    if (report.packages && !f.quiet) {
+      const k = report.packages;
+      console.log(dim(k.mode === 'all' ? `package selection: ALL packages (${k.reason})` : `package selection: ${k.affected.length} affected (${k.affected.join(', ') || 'none'}), ${k.skipped.length} unaffected`));
+    }
     if (report.selection && !f.quiet) {
       const s = report.selection;
       console.log(dim(s.mode === 'all' ? `test selection: ALL tests (${s.reason})` : `test selection: ${s.selected.length} selected, ${s.skipped.length} skipped, ${s.changed.length} changed file(s)`));
@@ -366,13 +403,15 @@ async function cmdExplain(target: string | undefined, f: Flags): Promise<number>
     for (const t of Object.values(p.config.tasks)) if (!affectedTasks.has(t.name) && t.dependsOn.some((d) => affectedTasks.has(d))) { affectedTasks.add(t.name); grew = true; }
   }
   const sel = selectTests(g, null, [rel]);
+  const owner = p.workspace?.packageOfFile(rel) ?? null;
   const out = {
-    file: rel, known: p.index.files.has(rel), affectedTasks: [...affectedTasks], conservative,
+    file: rel, package: owner?.name ?? null, known: p.index.files.has(rel), affectedTasks: [...affectedTasks], conservative,
     importedBy: [...reached.keys()].filter((k) => k !== rel).map((k) => ({ module: k, chain: g.chain(reached, k) })),
     tests: { mode: sel.mode, selected: sel.selected, chains: sel.chains },
   };
   if (f.json) { printJson(out); return EXIT.OK; }
   console.log(`${rel}${out.known ? '' : '  (not in the index: new, deleted, ignored or outside the project)'}`);
+  if (p.workspace) console.log(`  package        : ${out.package ?? '(outside every workspace package)'}`);
   console.log(`  tasks affected : ${out.affectedTasks.join(', ') || 'none'}`);
   if (conservative) console.log(`  CONSERVATIVE   : ${conservative} -> all tests run`);
   console.log(`  modules affected (${out.importedBy.length}):`);

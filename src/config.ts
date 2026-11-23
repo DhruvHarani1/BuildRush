@@ -8,6 +8,19 @@ import { ADAPTER_KIND, ADAPTER_NAMES, AdapterName } from './adapters.js';
 export const CONFIG_FILE = 'buildrush.json';
 
 export type TaskKind = 'build' | 'test' | 'check' | 'run';
+/** "root": one task. "packages": one instance per workspace package (see docs/configuration.md). */
+export type TaskScope = 'root' | 'packages';
+
+/** Set on per-package task instances (created by workspace expansion, never by the user). */
+export interface PackageRef {
+  name: string;
+  /** Package directory, project-relative POSIX. */
+  dir: string;
+  /** Directories of the package's transitive workspace dependencies. */
+  depDirs: string[];
+  /** The task declared `inputs` itself (adapter/default inputs are widened to dependency packages). */
+  explicitInputs: boolean;
+}
 
 export interface TaskConfig {
   name: string;
@@ -35,6 +48,11 @@ export interface TaskConfig {
   envPrefixes: string[];
   /** Adapter findings shown by `doctor` / `explain`. */
   notes: string[];
+  scope: TaskScope;
+  /** scope "packages" only: package-name globs restricting where the task runs (null = every package). */
+  packages: string[] | null;
+  /** Non-null on expanded per-package instances. */
+  package: PackageRef | null;
 }
 
 export interface Config {
@@ -46,6 +64,8 @@ export interface Config {
   concurrency: number;
   cache: { dir: string | null; maxSizeMB: number };
   tests: { patterns: string[] };
+  /** false = never detect workspaces; string[] = explicit package globs; null = auto-detect. */
+  workspaces: false | string[] | null;
 }
 
 export class ConfigError extends Error {
@@ -96,9 +116,9 @@ export function splitCommand(cmd: string): string[] {
 }
 
 const TASK_KEYS = new Set([
-  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'testCache',
+  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'scope', 'packages', 'testCache',
 ]);
-const TOP_KEYS = new Set(['$schema', 'version', 'project', 'tasks', 'pipelines', 'ignore', 'concurrency', 'cache', 'tests']);
+const TOP_KEYS = new Set(['$schema', 'version', 'project', 'tasks', 'pipelines', 'ignore', 'concurrency', 'cache', 'tests', 'workspaces']);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9:_-]*$/;
 
@@ -195,6 +215,22 @@ export function validateConfig(raw: unknown): Config {
       const timeoutMs = t.timeoutMs === undefined ? null : t.timeoutMs;
       if (timeoutMs !== null && (typeof timeoutMs !== 'number' || timeoutMs <= 0)) issues.push(`${w}.timeoutMs: must be a positive number`);
       if (t.affected !== undefined && typeof t.affected !== 'boolean') issues.push(`${w}.affected: must be boolean`);
+      let scope: TaskScope = 'root';
+      if (t.scope !== undefined) {
+        if (t.scope === 'root' || t.scope === 'packages') scope = t.scope;
+        else issues.push(`${w}.scope: must be "root" or "packages"`);
+      }
+      let pkgFilter: string[] | null = null;
+      if (t.packages !== undefined) {
+        if (scope !== 'packages') issues.push(`${w}.packages: only valid together with scope "packages"`);
+        else {
+          pkgFilter = strArray(t.packages, `${w}.packages`, issues);
+          if (pkgFilter) checkGlobs(pkgFilter, `${w}.packages`, issues);
+        }
+      }
+      if (scope === 'packages' && t.cwd !== undefined) {
+        issues.push(`${w}.cwd: not allowed with scope "packages" (every instance runs in its own package directory)`);
+      }
       if (t.testCache !== undefined && typeof t.testCache !== 'boolean') issues.push(`${w}.testCache: must be boolean`);
       if (t.testCache === true && kind !== 'test') issues.push(`${w}.testCache: only valid for tasks of kind "test"`);
       tasks[name] = {
@@ -215,11 +251,23 @@ export function validateConfig(raw: unknown): Config {
         adapter,
         envPrefixes: [],
         notes: [],
+        scope,
+        packages: pkgFilter,
+        package: null,
       };
     }
   }
   for (const t of Object.values(tasks)) {
-    for (const d of t.dependsOn) if (!tasks[d]) issues.push(`tasks.${t.name}.dependsOn: unknown task ${JSON.stringify(d)}`);
+    for (const d of t.dependsOn) {
+      const caret = d.startsWith('^');
+      const target = caret ? d.slice(1) : d;
+      if (!tasks[target]) issues.push(`tasks.${t.name}.dependsOn: unknown task ${JSON.stringify(target)}`);
+      else if (caret && t.scope !== 'packages') {
+        issues.push(`tasks.${t.name}.dependsOn: ${JSON.stringify(d)} ("^" = same task in dependency packages) is only valid on tasks with scope "packages"`);
+      } else if (caret && tasks[target]!.scope !== 'packages') {
+        issues.push(`tasks.${t.name}.dependsOn: ${JSON.stringify(d)} refers to task ${JSON.stringify(target)}, which does not have scope "packages"`);
+      }
+    }
   }
 
   const pipelines: Record<string, string[]> = {};
@@ -259,7 +307,22 @@ export function validateConfig(raw: unknown): Config {
       : (strArray(testsRaw.patterns, 'tests.patterns', issues) ?? []);
   checkGlobs(patterns, 'tests.patterns', issues);
 
-  const cycle = findTaskCycle(tasks);
+  let workspaces: Config['workspaces'] = null;
+  if (raw.workspaces !== undefined && raw.workspaces !== true) {
+    if (raw.workspaces === false) workspaces = false;
+    else {
+      const globs = strArray(raw.workspaces, 'workspaces', issues);
+      if (globs) {
+        checkGlobs(globs.map((g) => (g.startsWith('!') ? g.slice(1) : g)), 'workspaces', issues);
+        workspaces = globs;
+      }
+    }
+  }
+
+  // "^task" entries order package instances by the package graph; that cycle check happens at expansion.
+  const cycle = findTaskCycle(
+    Object.fromEntries(Object.entries(tasks).map(([n, t]) => [n, { dependsOn: t.dependsOn.filter((d) => !d.startsWith('^')) }])),
+  );
   if (cycle) issues.push(`tasks: dependency cycle ${cycle.join(' -> ')}`);
 
   if (issues.length) throw new ConfigError(issues);
@@ -272,6 +335,7 @@ export function validateConfig(raw: unknown): Config {
     concurrency,
     cache: { dir: (cacheRaw.dir as string | undefined) ?? null, maxSizeMB: maxSizeMB as number },
     tests: { patterns },
+    workspaces,
   };
 }
 
