@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { TaskConfig } from './config.js';
 import { parseJsonc } from './graph.js';
 import { readJson } from './util/fsx.js';
+import { hasSelfManagedIncremental } from './tsc-state.js';
 
 export type AdapterName = 'vite' | 'vitest' | 'tsc' | 'eslint';
 export const ADAPTER_NAMES: readonly AdapterName[] = ['vite', 'vitest', 'tsc', 'eslint'];
@@ -22,6 +23,8 @@ export interface Resolved {
   envPrefixes: string[];
   /** false = adapter cannot make this task safely cacheable. */
   cache: boolean;
+  /** tsc only: safe to run with engine-managed incremental state (--noEmit, no -b/composite/own incremental flags). */
+  incremental?: boolean;
   notes: string[];
 }
 
@@ -117,7 +120,8 @@ export async function resolveAdapter(name: AdapterName, cwd: string, t: TaskConf
     let noEmit = command.includes('--noEmit');
     let outDir: string | null = flagValue(command, '--outDir');
     const ts = (await readJson<unknown>(path.join(cwd, project)).catch(() => null)) ?? (await fs.readFile(path.join(cwd, project), 'utf8').then(parseJsonc, () => null));
-    const co = (ts as { compilerOptions?: { noEmit?: boolean; outDir?: string; incremental?: boolean; composite?: boolean; tsBuildInfoFile?: string } } | null)?.compilerOptions;
+    const tsObj = ts as { compilerOptions?: { noEmit?: boolean; outDir?: string; incremental?: boolean; composite?: boolean; tsBuildInfoFile?: string }; references?: unknown } | null;
+    const co = tsObj?.compilerOptions;
     if (co?.noEmit) noEmit = true;
     outDir ??= co?.outDir ?? null;
     let cache = true;
@@ -131,7 +135,13 @@ export async function resolveAdapter(name: AdapterName, cwd: string, t: TaskConf
       if (co?.incremental || co?.composite) notes.push('incremental/composite builds write .tsbuildinfo, which is not captured; consider "noEmit" for checks.');
     }
     void sub;
-    return { command, inputs: [`**/*.${SRC_EXT}`, ...PM_FILES], outputs, ...base, env: [], cache, notes };
+    // Engine-managed incremental state only for plain `tsc --noEmit` checks. Project references,
+    // composite/incremental configs, -b and user-supplied incremental flags have their own mode: unchanged.
+    const incremental =
+      t.incremental !== false && noEmit && ts !== null && !hasSelfManagedIncremental(command) &&
+      !co?.composite && !co?.incremental && !co?.tsBuildInfoFile && !tsObj?.references;
+    if (incremental) notes.push('incremental: tsc runs with --incremental and a buildrush-managed .tsbuildinfo (state, not an input or output) when the installed TypeScript supports it; set "incremental": false to disable.');
+    return { command, inputs: [`**/*.${SRC_EXT}`, ...PM_FILES], outputs, ...base, env: [], cache, incremental, notes };
   }
 
   // eslint

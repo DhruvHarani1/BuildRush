@@ -22,4 +22,4 @@ shipped unless tests exercise it.
 1. Per-package task splitting for workspaces (biggest real-world win).
 2. Parallel/streaming blob restore and hardlink/reflink restore where safe.
 3. Persisting the module graph incrementally instead of rebuilding it.
-4. Tool-native incremental modes (`tsc --incremental`) with their state dirs as declared outputs.
+4. ~~`tsc --incremental`~~ shipped as engine-managed *state* (not an output); same pattern for other tools (eslint `--cache`, vitest) is next.

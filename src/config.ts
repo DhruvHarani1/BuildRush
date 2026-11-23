@@ -29,6 +29,10 @@ export interface TaskConfig {
   /** For test tasks: append selected test files to argv under --affected. */
   affected: boolean;
   adapter: AdapterName | null;
+  /** User option (tsc adapter): false disables tsc incremental state. null = unset (automatic). */
+  incremental: boolean | null;
+  /** Set by the adapter: this task may safely use tsc incremental state (see tsc-state.ts). */
+  incrementalEligible: boolean;
   /** Env var name prefixes whose present variables are passed AND fingerprinted (set by adapters). */
   envPrefixes: string[];
   /** Adapter findings shown by `doctor` / `explain`. */
@@ -94,7 +98,7 @@ export function splitCommand(cmd: string): string[] {
 }
 
 const TASK_KEYS = new Set([
-  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter',
+  'command', 'dependsOn', 'inputs', 'outputs', 'env', 'passEnv', 'cache', 'kind', 'cwd', 'cpu', 'timeoutMs', 'affected', 'adapter', 'incremental',
 ]);
 const TOP_KEYS = new Set(['$schema', 'version', 'project', 'tasks', 'pipelines', 'ignore', 'concurrency', 'cache', 'tests']);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -148,6 +152,10 @@ export function validateConfig(raw: unknown): Config {
       if (t.adapter !== undefined) {
         if (typeof t.adapter === 'string' && (ADAPTER_NAMES as readonly string[]).includes(t.adapter)) adapter = t.adapter as AdapterName;
         else issues.push(`${w}.adapter: must be one of ${ADAPTER_NAMES.join(', ')}`);
+      }
+      if (t.incremental !== undefined) {
+        if (typeof t.incremental !== 'boolean') issues.push(`${w}.incremental: must be boolean`);
+        else if (adapter !== 'tsc') issues.push(`${w}.incremental: only supported with "adapter": "tsc"`);
       }
       let command: string[] = [];
       if (t.command === undefined && adapter) {
@@ -208,6 +216,8 @@ export function validateConfig(raw: unknown): Config {
         timeoutMs: timeoutMs as number | null,
         affected: t.affected === undefined ? kind === 'test' : (t.affected as boolean),
         adapter,
+        incremental: typeof t.incremental === 'boolean' ? t.incremental : null,
+        incrementalEligible: false,
         envPrefixes: [],
         notes: [],
       };

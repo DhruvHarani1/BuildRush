@@ -43,6 +43,7 @@ export class Project {
       t.envPrefixes = r.envPrefixes;
       if (!r.cache && !userOutputs) t.cache = false;
       t.notes = r.notes;
+      t.incrementalEligible = r.incremental === true && t.incremental !== false;
     }
     const stateDir = path.join(root, '.buildrush', 'state');
     const cacheDir = process.env.BUILDRUSH_CACHE_DIR

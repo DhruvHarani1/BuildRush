@@ -23,6 +23,37 @@ project because vite.config sets `publicDir`").
 | `tsc` | `tsc --noEmit` | every `*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,json}`, lockfiles | `<outDir>/**` when emitting | none | emitting without a project-relative `outDir` |
 | `eslint` | `eslint .` | source/config files, `.eslintrc*`, `eslint.config.*`, lockfiles | none | none | never |
 
+## tsc incremental mode (state, not input, not output)
+
+For plain `tsc --noEmit` checks the `tsc` adapter appends
+`--incremental --tsBuildInfoFile <.buildrush/state/incremental/<task>/...>` so a
+cache **miss** (e.g. a one-file edit) can reuse TypeScript's own semantic
+analysis instead of re-checking everything. The `.tsbuildinfo` is **task state**:
+
+* it is **not** hashed into the fingerprint, and the extra flags are not part of
+  the fingerprinted command, so cache keys remain a pure function of declared inputs;
+* it is **not** a cached output: a cache hit never restores it, and it is never
+  stored in the cache. If it is missing or discarded, the only effect is a slower run;
+* tsc itself validates it against file hashes and compiler options; BuildRush
+  additionally discards it when the TypeScript version, any `tsconfig*.json`
+  content, the command, or Node/platform change, when it is not valid JSON, and
+  after **any** run that did not succeed (type errors, timeout, cancellation);
+* tsc writes to a private copy that is atomically renamed into place only after a
+  successful run, so an interrupted or superseded run cannot leave a half-written file.
+
+Enabled only when all hold: adapter `tsc`; effective `--noEmit`; installed
+TypeScript major >= 5 (detected from `node_modules`); no `-b/--build`, `--watch`,
+`--incremental`, `--composite`, `--tsBuildInfoFile` flags; tsconfig has no
+`composite`, `incremental`, `tsBuildInfoFile` or `references`. Otherwise the
+command runs exactly as written (`-b` and project-reference builds keep their own mode).
+Opt out per task with `"incremental": false` (valid only with `"adapter": "tsc"`).
+The task notes in the run report say whether state was reused or discarded.
+
+**Expect modest gains.** Incremental mode skips re-*checking* unchanged files but
+still parses, binds and builds the program, which dominate on small and medium
+projects. On Windows with TypeScript 5.9 we measured roughly 0-15% on 60-1000 module synthetic apps; do not expect more than the
+check phase to disappear.
+
 ## Safety behaviour you should know
 
 * **Widening instead of guessing.** If the tool config contains `root`, `envDir`,

@@ -49,11 +49,21 @@ name and renamed into place; outputs recorded by the previous successful run
 that are not part of the restored set are removed. Corrupt entries are
 discarded and the task is simply re-run.
 
+## State vs input vs output
+
+* **Input**: contributes to the fingerprint (file contents, env, tool versions, dependency fingerprints).
+* **Output**: declared, captured after success, stored in the cache, restored on a hit.
+* **State**: persists between runs under `.buildrush/state/`, is **neither** of the above.
+  It may only make a cache *miss* faster; removing it must never change a result.
+  Example: the `tsc` adapter's `.tsbuildinfo` (see [adapters.md](adapters.md#tsc-incremental-mode-state-not-input-not-output)).
+  A tool is only given state if it validates the state itself AND BuildRush drops it on
+  tool-version/config/command change, on corruption, and after any non-successful run.
+  State is written to a work copy and committed by atomic rename only on success.
+
 ## Limits of incremental builds
 
 Cached units are **whole tasks**. A one-line edit to a file listed in a build
-task's inputs re-runs that task (the underlying tool, e.g. `tsc --incremental`,
-may still be incremental internally). Finer granularity (per-package,
+task's inputs re-runs that task (the underlying tool may still be incremental internally; for `tsc --noEmit` BuildRush manages that state itself, see above). Finer granularity (per-package,
 per-module) comes from workspace-aware task splitting and tool adapters; it is
 roadmap work, not a claim of this version. Final bundles are never patched
 in place.

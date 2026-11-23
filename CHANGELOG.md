@@ -15,6 +15,7 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - Security docs, CI, CodeQL, OpenSSF Scorecard, dependency review, provenance-enabled release workflow, hardened Dockerfile.
 
 - Adapters (`vite`, `vitest`, `tsc`, `eslint`): tool-aware inputs (incl. `.env*`, `VITE_*`), outDir discovery, tool-version fingerprinting, refusal of uncacheable modes, failure diagnostics. See docs/adapters.md.
+- `tsc` adapter: engine-managed `--incremental` state for `tsc --noEmit` (state, never an input or output; discarded on tsc/tsconfig/command change, corruption and any non-success; `incremental: false` opts out; `-b`/project references/composite unchanged). See docs/adapters.md.
 - Benchmark suite (`bench/`) with native-sequential and native-parallel baselines and a restored-build equality check.
 - `scripts/apply-github-security.sh`: idempotent repository hardening (branch protection, rulesets, Actions policy).
 

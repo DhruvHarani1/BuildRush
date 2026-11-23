@@ -10,6 +10,7 @@ import { changedFilesFromGit, selectTests, Selection } from './affected.js';
 import { canonical, hashFile, hmac256, mapLimit, sha256 } from './util/hash.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
 import { compileGlobs } from './util/glob.js';
+import { beginTscIncremental, IncrementalRun, supportsTscIncremental } from './tsc-state.js';
 import { assertNoSymlinkInPath, resolveInside, toPosix, UnsafePathError } from './util/paths.js';
 
 export interface TaskReport {
@@ -237,15 +238,38 @@ export async function runTasks(project: Project, requested: string[], opts: RunO
 
       // ---- execute -------------------------------------------------------------------------
       const redact = makeRedactor(env);
-      const res = await runCommand({
-        file: exe,
-        args: [...t.command.slice(1), ...args],
-        cwd: taskCwd,
-        env,
-        signal,
-        timeoutMs: t.timeoutMs,
-        redact,
-      });
+      // Engine-managed tsc state: never part of the fingerprint, never a cached output.
+      let inc: IncrementalRun | null = null;
+      const tscVersion = components.toolchain.tsc;
+      if (t.adapter === 'tsc' && t.incrementalEligible && t.incremental !== false && typeof tscVersion === 'string' && supportsTscIncremental(tscVersion)) {
+        try {
+          const configs: Record<string, string> = {};
+          for (const [p, f] of project.index.files) if (/(^|\/)[jt]sconfig[^/]*\.json$/.test(p)) configs[p] = f.digest;
+          inc = await beginTscIncremental(project.stateDir, name, {
+            version: tscVersion, command: t.command, args, cwd: t.cwd, executable: String(components.toolchain.executable), configs,
+          });
+          rep.notes.push(inc.note);
+        } catch (e) {
+          inc = null;
+          rep.notes.push(`incremental tsc unavailable (${(e as Error).message}); running a full check`);
+        }
+      }
+      let res;
+      try {
+        res = await runCommand({
+          file: exe,
+          args: [...t.command.slice(1), ...(inc?.args ?? []), ...args],
+          cwd: taskCwd,
+          env,
+          signal,
+          timeoutMs: t.timeoutMs,
+          redact,
+        });
+      } catch (e) {
+        await inc?.finish(false);
+        throw e;
+      }
+      await inc?.finish(res.exitCode === 0 && !res.cancelled && !res.timedOut && !res.spawnError);
       rep.durationMs = res.durationMs;
       rep.exitCode = res.exitCode;
       rep.log = res.log;

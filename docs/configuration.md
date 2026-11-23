@@ -15,6 +15,7 @@ Unknown keys are errors, not silently ignored. Run `buildrush config validate`.
   "tasks": {
     "build": {
       "adapter": "vite",                // optional: vite | vitest | tsc | eslint (see adapters.md). With an adapter, command/inputs/outputs/env default sensibly
+      "incremental": false,             // tsc adapter only: opt out of engine-managed --incremental state (see adapters.md)
       "command": "vite build",          // string (no shell syntax allowed) or ["argv", "array"]
       "kind": "build",                  // build | test | check | run (default run)
       "dependsOn": ["typecheck"],
