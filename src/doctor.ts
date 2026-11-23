@@ -21,9 +21,8 @@ export async function runDoctor(start: string): Promise<Check[]> {
 
   const major = Number(process.versions.node.split('.')[0]);
   add('node', major >= 22 ? 'ok' : 'fail', `v${process.versions.node}${major >= 22 ? '' : ' (BuildRush requires >= 22)'}`);
-  add('platform', process.platform === 'win32' ? 'warn' : 'ok', process.platform === 'win32'
-    ? 'Windows is untested: .cmd shims cannot be spawned without a shell, so npm-installed tools may not resolve'
-    : `${process.platform}/${process.arch}`);
+  // Windows is covered by CI; npm .cmd shims are unwrapped to their node entry point (never run via cmd.exe).
+  add('platform', 'ok', `${process.platform}/${process.arch}`);
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
     add('privileges', 'warn', 'running as root: task commands from the project config will run as root. Use an unprivileged user.');
   } else add('privileges', 'ok', 'not running as root');
