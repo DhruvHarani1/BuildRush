@@ -6,8 +6,8 @@ valid previous results, runs independent tasks in parallel, and tells you
 exactly why anything ran.
 
 > **Status: early (0.1).** The core engine is real and tested (60 tests,
-> including adversarial cache/path/secret tests). Watch mode, daemon,
-> tool-specific adapters are **not built yet**; see
+> including adversarial cache/path/secret tests). Watch mode (`--watch`) is
+> available; the daemon is **not built yet**; see
 > [ROADMAP.md](ROADMAP.md). No benchmark claims are made until the benchmark
 > suite exists.
 
@@ -19,6 +19,8 @@ npx buildrush init                    # detects vite/vitest/eslint/tsc and write
 npx buildrush run                     # runs the default pipeline with caching
 npx buildrush run                     # again: everything is [cached]
 npx buildrush test --affected         # only tests that (transitively) import what you changed
+npx buildrush test --watch            # stay running; re-run only what each file change affects (also run/build/check)
+npx buildrush run --watch --json      # one JSON object per cycle (NDJSON) for editors and scripts
 npx buildrush explain src/Button.tsx  # tasks, modules and tests this file affects, with import chains
 ```
 
