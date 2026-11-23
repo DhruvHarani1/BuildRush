@@ -106,20 +106,31 @@ test('watch: task outputs and ignored directories never start a cycle', { timeou
   try {
     await waitFor(() => h.cycles.length >= 1, 'initial cycle');
     // compile rewrites dist/bundle.txt on this edit; that write must not come back as a change.
+    // (writeFile truncates then writes, so one edit may emit two events and supersede the first
+    // restarted cycle; assertions look at completed cycles only.)
+    const done = () => h.cycles.filter((c) => !c.superseded);
     await h.write('src/c.js', 'export const c = 3; // v4\n');
-    await waitFor(() => h.cycles.length >= 2, 'cycle after src edit');
-    assert.deepEqual(h.cycles[1]!.changed, { added: [], modified: ['src/c.js'], removed: [] });
-    assert.equal(h.cycles[1]!.report!.tasks.find((t) => t.task === 'compile')!.state, 'succeeded');
+    await waitFor(() => done().length >= 2, 'cycle after src edit');
+    const edit = done()[1]!;
+    assert.ok(edit.changed.modified.includes('src/c.js'));
+    assert.deepEqual(edit.changed.added, []);
+    assert.equal(edit.report!.tasks.find((t) => t.task === 'compile')!.state, 'succeeded');
 
     await h.write('dist/bundle.txt', 'tampered output');
     await h.write('node_modules/x/index.js', 'ignored');
     await h.write('.git/hooks-note', 'ignored');
     await h.write('.buildrush/scratch', 'ignored');
     await h.write('scripts/lint.js', "console.log('lint ok v3');\n");
-    await waitFor(() => h.cycles.length >= 3, 'cycle after lint edit');
-    assert.deepEqual(h.cycles[2]!.changed, { added: [], modified: ['scripts/lint.js'], removed: [] });
+    await waitFor(() => done().length >= 3, 'cycle after lint edit');
+    assert.ok(done()[2]!.changed.modified.includes('scripts/lint.js'));
+    // Only the tampered output and ignored dirs must be absent from every cycle's change set.
     await h.close();
-    assert.equal(h.cycles.length, 3, 'outputs / ignored dirs must not have started extra cycles');
+    for (const c of h.cycles) {
+      for (const f of [...c.changed.added, ...c.changed.modified, ...c.changed.removed]) {
+        assert.ok(!/^(dist\/|node_modules\/|\.git\/|\.buildrush\/)/.test(f), `ignored/output path ${f} leaked into a cycle`);
+      }
+    }
+    assert.equal(done().length, 3, 'outputs / ignored dirs must not have started extra completed cycles');
   } finally {
     await h.close();
     await rm(dir);
