@@ -1,0 +1,177 @@
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
+
+/**
+ * Where a project's daemon keeps its endpoint, token and metadata.
+ *
+ * Everything lives in a per-user directory OUTSIDE the project tree:
+ *   POSIX   $XDG_RUNTIME_DIR/buildrush            (tmpfs, 0700, already per-user), else
+ *           <os.tmpdir()>/buildrush-<uid>
+ *   Windows %LOCALAPPDATA%\BuildRush\daemon        (per-user profile ACL), else <os.tmpdir()>\buildrush-daemon
+ *   override: BUILDRUSH_DAEMON_DIR (tests, unusual setups); validated exactly like the defaults.
+ * Each project gets its own 0700 subdirectory keyed by a hash of its realpath.
+ */
+export interface DaemonDirs {
+  base: string;
+  /** Per-project directory (0700). */
+  dir: string;
+  key: string;
+  token: string;
+  meta: string;
+  log: string;
+  /** Held (as a directory) while a daemon is starting; serialises concurrent starters. */
+  lock: string;
+  /** POSIX: the Unix socket path (inside `dir`). Windows: unused (the pipe name is in meta). */
+  socket: string;
+}
+
+export interface DaemonMeta {
+  proto: number;
+  version: string;
+  pid: number;
+  root: string;
+  /** Unix socket path or Windows pipe name. */
+  endpoint: string;
+  startedAt: number;
+  node: string;
+}
+
+const isWin = process.platform === 'win32';
+
+export function normalizeRoot(root: string): string {
+  return isWin ? root.toLowerCase() : root;
+}
+
+export function projectKey(root: string): string {
+  return createHash('sha256').update('buildrush-daemon\0' + normalizeRoot(root)).digest('hex').slice(0, 16);
+}
+
+export function resolveBaseDir(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.BUILDRUSH_DAEMON_DIR) return path.resolve(env.BUILDRUSH_DAEMON_DIR);
+  if (isWin) {
+    return env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'BuildRush', 'daemon') : path.join(os.tmpdir(), 'buildrush-daemon');
+  }
+  if (env.XDG_RUNTIME_DIR && path.isAbsolute(env.XDG_RUNTIME_DIR)) return path.join(env.XDG_RUNTIME_DIR, 'buildrush');
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
+  return path.join(os.tmpdir(), `buildrush-${uid}`);
+}
+
+/** sun_path is 104 bytes on macOS/BSD and 108 on Linux; stay below the smaller. */
+const MAX_SOCKET_PATH = 100;
+
+export function daemonDirs(root: string, env: NodeJS.ProcessEnv = process.env): DaemonDirs {
+  const base = resolveBaseDir(env);
+  const key = projectKey(root);
+  const dir = path.join(base, key);
+  return {
+    base, dir, key,
+    token: path.join(dir, 'token'),
+    meta: path.join(dir, 'daemon.json'),
+    log: path.join(dir, 'log'),
+    lock: path.join(dir, 'starting'),
+    socket: path.join(dir, 's'),
+  };
+}
+
+export function assertSocketPathFits(p: string): void {
+  if (!isWin && Buffer.byteLength(p) > MAX_SOCKET_PATH) {
+    throw new Error(`daemon socket path is too long for this OS (${Buffer.byteLength(p)} > ${MAX_SOCKET_PATH} bytes): ${p}; set BUILDRUSH_DAEMON_DIR to a shorter directory`);
+  }
+}
+
+/** A fresh, unguessable Windows pipe name (pipes live in one global namespace). */
+export function newPipeName(key: string): string {
+  return `\\\\.\\pipe\\buildrush-${key}-${randomBytes(8).toString('hex')}`;
+}
+
+function posixOwnerCheck(st: import('node:fs').Stats, what: string): void {
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+    throw new Error(`${what} is not owned by the current user; refusing to use it`);
+  }
+}
+
+/**
+ * Create `dir` if needed and make sure it is a real directory, owned by us and (POSIX) mode 0700.
+ * A pre-existing directory we own with loose permissions is tightened; anything else is refused.
+ * Windows: a directory we create is restricted to the current user via icacls (best effort).
+ */
+export async function ensureSecureDir(dir: string): Promise<{ created: boolean; acl: 'restricted' | 'inherited' | 'n/a' }> {
+  await fs.mkdir(path.dirname(dir), { recursive: true });
+  let created = true;
+  try {
+    await fs.mkdir(dir, { mode: 0o700 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    created = false;
+  }
+  if (isWin) return { created, acl: created ? ((await restrictWindowsAcl(dir)) ? 'restricted' : 'inherited') : 'inherited' };
+  let st = await fs.lstat(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} is not a plain directory; refusing to use it`);
+  posixOwnerCheck(st, dir);
+  if ((st.mode & 0o077) !== 0) {
+    await fs.chmod(dir, 0o700);
+    st = await fs.lstat(dir);
+    if ((st.mode & 0o077) !== 0) throw new Error(`cannot restrict ${dir} to mode 0700`);
+  }
+  return { created, acl: 'n/a' };
+}
+
+/** Read-only variant used by clients: never creates or repairs anything. Returns a reason when unsafe. */
+export async function checkSecureDir(dir: string): Promise<string | null> {
+  try {
+    const st = await fs.lstat(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return `${dir} is not a plain directory`;
+    if (!isWin) {
+      if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return `${dir} is owned by another user`;
+      if ((st.mode & 0o077) !== 0) return `${dir} is accessible by other users (mode ${(st.mode & 0o777).toString(8)})`;
+    }
+    return null;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : (e as Error).message;
+  }
+}
+
+export async function checkSecureFile(file: string): Promise<string | null> {
+  try {
+    const st = await fs.lstat(file);
+    if (!st.isFile()) return `${file} is not a regular file`;
+    if (!isWin) {
+      if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return `${file} is owned by another user`;
+      if ((st.mode & 0o077) !== 0) return `${file} is accessible by other users`;
+    }
+    return null;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : (e as Error).message;
+  }
+}
+
+/** Write a secret: never follows an existing path, mode 0600 from the first byte. */
+export async function writeSecretFile(file: string, data: string): Promise<void> {
+  await fs.rm(file, { force: true });
+  await fs.writeFile(file, data, { mode: 0o600, flag: 'wx' });
+}
+
+function run(cmd: string, args: string[]): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      execFile(cmd, args, { timeout: 10_000, windowsHide: true }, (err) => resolve(!err));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Grant the current user full control, then drop inherited entries so only that user (plus the
+ * ACEs we do not remove explicitly: none) remains. The grant happens first and the inheritance
+ * change only if the grant worked, so a failure can never lock the user out of their own directory.
+ */
+async function restrictWindowsAcl(dir: string): Promise<boolean> {
+  const name = process.env.USERNAME || os.userInfo().username;
+  const account = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${name}` : name;
+  if (!(await run('icacls', [dir, '/grant:r', `${account}:(OI)(CI)F`]))) return false;
+  return run('icacls', [dir, '/inheritance:r']);
+}

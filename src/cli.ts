@@ -8,6 +8,8 @@ import { Project } from './project.js';
 import { selectTests } from './affected.js';
 import { runDoctor } from './doctor.js';
 import { startWatch, WatchChanges } from './watch.js';
+import { analyze, cacheStats, packageImportEdges, writeLastRun } from './daemon/ops.js';
+import { cmdDaemon, daemonWanted, tryDaemon } from './daemon/cli.js';
 import { readJson, writeFileAtomic } from './util/fsx.js';
 import { compileGlobs } from './util/glob.js';
 
@@ -29,8 +31,12 @@ Commands:
   cache stats|verify|clean Inspect, verify (--repair) or empty the local cache
   doctor                   Diagnose environment, config and cache problems
   config validate          Validate ${CONFIG_FILE}
+  daemon start|stop|status Manage this project's optional local daemon (see docs/daemon.md)
 
 Options:
+  --daemon                 Serve run/build/test/check, analyze --json and cache stats from a warm local daemon
+                           (started on demand; BUILDRUSH_DAEMON=1 is the same). Always falls back to a normal run.
+  --no-daemon              Never use the daemon, even if BUILDRUSH_DAEMON=1
   --watch                  Keep running; re-run affected work on every file change (run/build/test/check)
   --affected               Run only tests affected by changes (test tasks; falls back to all tests when unsure).
                            In a workspace, also only the tasks of affected packages (changed + dependents)
@@ -50,7 +56,7 @@ Exit codes: 0 success, 1 task failure, 2 usage/config error, 3 internal error, 1
 interface Flags {
   json: boolean; verbose: boolean; quiet: boolean; affected: boolean; noCache: boolean; bail: boolean;
   force: boolean; repair: boolean; dot: boolean; help: boolean; version: boolean; watch: boolean;
-  packages: boolean;
+  packages: boolean; daemon: boolean; noDaemon: boolean;
   since?: string; concurrency?: number; root?: string;
 }
 
@@ -58,7 +64,7 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
   const flags: Flags = {
     json: false, verbose: false, quiet: false, affected: false, noCache: false, bail: false,
     force: false, repair: false, dot: false, help: false, version: false, watch: false,
-    packages: false,
+    packages: false, daemon: false, noDaemon: false,
   };
   const positional: string[] = [];
   const need = (i: number, name: string): string => {
@@ -73,6 +79,8 @@ export function parseArgs(argv: string[]): { positional: string[]; flags: Flags 
       case '--verbose': case '-v': flags.verbose = true; break;
       case '--quiet': case '-q': flags.quiet = true; break;
       case '--watch': case '-w': flags.watch = true; break;
+      case '--daemon': flags.daemon = true; break;
+      case '--no-daemon': flags.noDaemon = true; break;
       case '--affected': flags.affected = true; break;
       case '--no-cache': flags.noCache = true; break;
       case '--bail': flags.bail = true; break;
@@ -151,6 +159,9 @@ export async function main(argv: string[]): Promise<number> {
       case 'explain': return await cmdExplain(rest[0], flags);
       case 'cache': return await cmdCache(rest[0], flags);
       case 'doctor': return await cmdDoctor(flags);
+      case 'daemon':
+        if (!['start', 'stop', 'status', '__serve'].includes(rest[0] ?? '')) throw new UsageError('usage: buildrush daemon start|stop|status');
+        return await cmdDaemon(rest[0], startDir(flags), flags, rest.slice(1));
       case 'config':
         if (rest[0] === 'validate') return await cmdValidate(flags);
         throw new UsageError('usage: buildrush config validate');
@@ -212,29 +223,13 @@ async function cmdValidate(f: Flags): Promise<number> {
 }
 
 async function cmdAnalyze(f: Flags): Promise<number> {
+  if (f.json && daemonWanted(f)) {
+    const via = await tryDaemon<unknown>(startDir(f), 'analyze', {});
+    if (via.ok) { printJson(via.data); return EXIT.OK; }
+    if (f.verbose) console.error(`buildrush: daemon unavailable (${via.reason}); analysing in-process`);
+  }
   const p = await open(f);
-  const det = await detectProject(p.root);
-  const g = await p.graph();
-  await p.saveGraph(g);
-  const cycles = g.cycles();
-  const uncertain = [...g.modules.values()].filter((m) => m.uncertain.length);
-  const edges = [...g.deps.values()].reduce((n, m) => n + m.size, 0);
-  const result = {
-    project: p.config.project.name,
-    root: p.root,
-    packageManager: det.packageManager,
-    tools: det.tools,
-    workspacePackages: Object.fromEntries(g.workspacePackages),
-    workspace: p.workspace ? { ...p.workspace.summary(), importEdges: Object.fromEntries(packageImportEdges(g)), cycle: p.workspace.findCycle() } : null,
-    files: p.index.files.size,
-    modules: g.modules.size,
-    edges,
-    tests: g.testFiles().length,
-    importCycles: cycles,
-    uncertainModules: uncertain.map((m) => ({ path: m.path, reasons: m.uncertain })),
-    skippedSymlinks: p.index.skippedSymlinks.length,
-    tasks: Object.fromEntries(Object.values(p.config.tasks).map((t) => [t.name, { kind: t.kind, dependsOn: t.dependsOn, cache: t.cache }])),
-  };
+  const { result, det, g, uncertain, cycles, edges } = await analyze(p);
   if (f.json) { printJson(result); return EXIT.OK; }
   console.log(`${result.project}  (${p.root})`);
   console.log(`  package manager : ${det.packageManager ?? 'none detected'}${det.lockfiles.length > 1 ? `  (WARNING: multiple lockfiles: ${det.lockfiles.join(', ')})` : ''}`);
@@ -255,11 +250,6 @@ async function cmdAnalyze(f: Flags): Promise<number> {
   for (const m of uncertain.slice(0, 5)) console.log(`    - ${m.path}: ${m.uncertain[0]}`);
   if (p.index.skippedSymlinks.length) console.log(`  symlinks        : ${p.index.skippedSymlinks.length} skipped (never followed)`);
   return EXIT.OK;
-}
-
-/** Package -> packages it imports from, as observed in the module graph (sorted, for display). */
-function packageImportEdges(g: import('./graph.js').DepGraph): Map<string, string[]> {
-  return new Map([...g.packageEdges()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, [...v].sort()]));
 }
 
 async function cmdGraph(f: Flags): Promise<number> {
@@ -307,32 +297,55 @@ function line(r: TaskReport, verbose: boolean): string {
 }
 
 async function cmdRun(names: string[], f: Flags, signal: AbortSignal): Promise<number> {
-  const p = await open(f);
-  for (const n of names) {
-    if (!p.config.tasks[n] && !p.config.pipelines[n] && !p.taskGroups[n]) {
-      throw new Error(`unknown task ${JSON.stringify(n)} (tasks: ${Object.keys(p.config.tasks).join(', ')}; pipelines: ${Object.keys(p.config.pipelines).join(', ') || 'none'}${Object.keys(p.taskGroups).length ? `; per-package tasks: ${Object.keys(p.taskGroups).join(', ')}` : ''})`);
-    }
+  const header = (project: string, tasks: number) => {
+    if (!f.json && !f.quiet) console.log(dim(`BuildRush ${VERSION} · ${project} · ${tasks} task(s)`));
+  };
+  const onTaskDone = (r: TaskReport) => {
+    if (f.json) return;
+    const bad = r.state === 'failed' || r.state === 'cancelled';
+    if (f.quiet && !bad) return;
+    console.log(line(r, f.verbose));
+    for (const d of r.diagnostics.slice(0, 10)) console.log(`    ! ${d}`);
+    if (r.log && (r.state === 'failed' || f.verbose)) console.log(r.log.replace(/\n$/, '').split('\n').map((l) => '    | ' + l).join('\n'));
+  };
+  let remote: RunReport | null = null;
+  if (daemonWanted(f)) {
+    // Opt-in fast path. Anything other than a complete result (including a crash mid-run) falls
+    // through to the ordinary in-process run below; the cache makes re-doing finished work free.
+    const via = await tryDaemon<RunReport>(
+      startDir(f), 'run',
+      { tasks: names, flags: { noCache: f.noCache, bail: f.bail, concurrency: f.concurrency, affected: f.affected, since: f.since } },
+      {
+        signal,
+        onMessage: (m) => {
+          if (m.type === 'begin') header(m.project, m.tasks);
+          else if (m.type === 'task') onTaskDone(m.report as TaskReport);
+        },
+      },
+    );
+    if (via.ok) remote = via.data;
+    else if (f.verbose || via.reason.includes('mid-run')) console.error(`buildrush: daemon unavailable (${via.reason}); running in-process`);
   }
-  if (!f.json && !f.quiet) console.log(dim(`BuildRush ${VERSION} · ${p.config.project.name} · ${closure(p, expandNames(p, names)).length} task(s)`));
-  const report: RunReport = await runTasks(p, names, {
-    noCache: f.noCache,
-    bail: f.bail,
-    concurrency: f.concurrency,
-    affected: f.affected ? { since: f.since } : null,
-    signal,
-    onTaskDone: (r) => {
-      if (f.json) return;
-      const bad = r.state === 'failed' || r.state === 'cancelled';
-      if (f.quiet && !bad) return;
-      console.log(line(r, f.verbose));
-      for (const d of r.diagnostics.slice(0, 10)) console.log(`    ! ${d}`);
-      if (r.log && (r.state === 'failed' || f.verbose)) console.log(r.log.replace(/\n$/, '').split('\n').map((l) => '    | ' + l).join('\n'));
-    },
-  });
-  await writeFileAtomic(
-    path.join(p.stateDir, 'last-run.json'),
-    JSON.stringify({ at: Date.now(), requested: names, tasks: report.tasks.map((t) => ({ ...t, log: undefined })), selection: report.selection, packages: report.packages ?? null }),
-  );
+  const runLocal = async (): Promise<RunReport> => {
+    const p = await open(f);
+    for (const n of names) {
+      if (!p.config.tasks[n] && !p.config.pipelines[n] && !p.taskGroups[n]) {
+        throw new Error(`unknown task ${JSON.stringify(n)} (tasks: ${Object.keys(p.config.tasks).join(', ')}; pipelines: ${Object.keys(p.config.pipelines).join(', ') || 'none'}${Object.keys(p.taskGroups).length ? `; per-package tasks: ${Object.keys(p.taskGroups).join(', ')}` : ''})`);
+      }
+    }
+    header(p.config.project.name, closure(p, expandNames(p, names)).length);
+    const r = await runTasks(p, names, {
+      noCache: f.noCache,
+      bail: f.bail,
+      concurrency: f.concurrency,
+      affected: f.affected ? { since: f.since } : null,
+      signal,
+      onTaskDone,
+    });
+    await writeLastRun(p, names, r);
+    return r;
+  };
+  const report: RunReport = remote ?? (await runLocal());
   const count = (s: string) => report.tasks.filter((t) => t.state === s).length;
   const saved = report.tasks.reduce((n, t) => n + t.savedMsEstimate, 0);
   if (f.json) {
@@ -425,11 +438,17 @@ async function cmdCache(sub: string | undefined, f: Flags): Promise<number> {
   const p = await open(f, false);
   switch (sub) {
     case 'stats': {
-      const s = await p.cache.stats();
-      const life = await readStats(p);
+      type CS = Awaited<ReturnType<typeof cacheStats>>;
+      let cs: CS | null = null;
+      if (daemonWanted(f)) {
+        const via = await tryDaemon<CS>(startDir(f), 'cacheStats', {});
+        if (via.ok) cs = via.data;
+        else if (f.verbose) console.error(`buildrush: daemon unavailable (${via.reason}); reading in-process`);
+      }
+      const { stats: s, lifetime: life, maxSizeMB } = cs ?? (await cacheStats(p));
       if (f.json) { printJson({ ...s, lifetime: life }); break; }
       console.log(`cache: ${s.dir}`);
-      console.log(`  entries ${s.entries}, blobs ${s.blobs}, size ${fmtBytes(s.bytes)} (limit ${p.config.cache.maxSizeMB} MiB)`);
+      console.log(`  entries ${s.entries}, blobs ${s.blobs}, size ${fmtBytes(s.bytes)} (limit ${maxSizeMB} MiB)`);
       console.log(`  lifetime: ${life.hits} hit(s), ${life.misses} miss(es), restored ${fmtBytes(life.bytesRestored)}, stored ${fmtBytes(life.bytesStored)}`);
       console.log(`  estimated time saved: ${fmtMs(life.estimatedSavedMs)}  (estimate: sum of original durations of reused results)`);
       break;
