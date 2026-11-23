@@ -6,6 +6,10 @@ updates:
     open-pull-requests-limit: 5
     groups:
       dev-dependencies: { dependency-type: development }
+    ignore:
+      # Types must match the lowest supported Node (engines >=22); bump this deliberately with `engines`.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }

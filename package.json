@@ -4,14 +4,37 @@
   "description": "Local-first incremental build, test and developer execution engine: content-addressed caching, dependency-aware affected-test selection, bounded parallel scheduling.",
   "license": "MIT",
   "type": "module",
-  "bin": { "buildrush": "bin/buildrush.js" },
+  "bin": {
+    "buildrush": "bin/buildrush.js"
+  },
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
-  "engines": { "node": ">=22" },
-  "files": ["bin", "dist/src", "README.md", "LICENSE", "SECURITY.md"],
-  "repository": { "type": "git", "url": "git+https://github.com/DhruvHarani1/BuildRush.git" },
-  "bugs": { "url": "https://github.com/DhruvHarani1/BuildRush/issues" },
-  "keywords": ["build", "cache", "incremental", "monorepo", "test", "affected", "cli"],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "bin",
+    "dist/src",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DhruvHarani1/BuildRush.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DhruvHarani1/BuildRush/issues"
+  },
+  "keywords": [
+    "build",
+    "cache",
+    "incremental",
+    "monorepo",
+    "test",
+    "affected",
+    "cli"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -20,7 +43,7 @@
     "prepack": "npm run build"
   },
   "devDependencies": {
-    "@types/node": "^26.6.6",
+    "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
   }
 }
