@@ -31,8 +31,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm sbom --sbom-format cyclonedx --omit dev > sbom.cdx.json
+      # npm trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 ships an older npm.
+      # No NPM_TOKEN: configure the trusted publisher at npmjs.com (package Settings): DhruvHarani1/BuildRush, release.yml, environment 'release'.
+      - run: npm install -g npm@^11.5.1 && npm --version
       - run: npm publish --provenance --access public
-        env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }   # or remove when npm trusted publishing is configured
       - name: GitHub release with SBOM
         env: { GH_TOKEN: '${{ github.token }}' }
         run: gh release create "${GITHUB_REF_NAME}" sbom.cdx.json --generate-notes --verify-tag
